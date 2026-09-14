@@ -73,7 +73,7 @@ them, it describes the current proposal.
 | BEAM construct | On Silica | Silica today | Class | Closed by | Target |
 | --- | --- | --- | --- | --- | --- |
 | Process | **A plain Silica actor** whose messages are `bees_term` (D1) | Tested | — | Stage 1 | 1.0 |
-| Lightweight processes in massive numbers | The BEES scheduler (D3), running many plain Silica actors on each carrier thread through the Silica scheduler interface | Spec §15.1.2.2; one pthread per actor today | B; U (S-6) for the interface | A6, X2 | 1.0 |
+| Lightweight processes in massive numbers | The BEES scheduler (D3). OS-hosted, it runs many plain Silica actors on each carrier thread through the Silica scheduler interface; running raw, it places them directly on the chip's cores (roadmap §4.10). | Spec §15.1.2.2; one pthread per actor today | B; U (S-6) for the interface | A6, X2 | 1.0 |
 | `spawn`, `spawn_opt`, spawning on a given core | Silica `spawn`, with the entry function reached through the module table | Tested | — (B for the BIF) | Stage 1 | 1.0 |
 | `!` (send) | Silica `cast` of a `bees_term` | Tested | — | Stage 1 | 1.0 |
 | Message order per sender/receiver pair | Silica FIFO mailbox | Tested | — | — | — |
@@ -130,10 +130,10 @@ them, it describes the current proposal.
 
 | BEAM construct | On Silica | Silica today | Class | Closed by | Target |
 | --- | --- | --- | --- | --- | --- |
-| Schedulers, reductions, work stealing, priorities | **The BEES scheduler** (`bees_sched`, D3): per-core carrier threads, run queues, work stealing, a dispatch budget standing in for reductions, and a separate pool for blocking and dangerous actors | Spec contradicts itself (§15.1.2.2 vs §26.2.1); no mechanism | B; U (S-6) for the interface | A6 | 1.0 |
+| Schedulers, reductions, work stealing, priorities | **The BEES scheduler** (`bees_sched`, D3): a dispatch budget standing in for reductions, and priorities, in both environments. OS-hosted: per-core carrier threads, run queues, work stealing, and a separate pool for blocking and dangerous actors. Running raw: balancing directly onto the cores with Silica's `migrate_actor()` (roadmap §4.10). | Spec contradicts itself (§15.1.2.2 vs §26.2.1); no mechanism | B; U (S-6) for the interface | A6 | 1.0 |
 | Preemption of long-running code | Yield points at tail calls and receive boundaries, placed by compilers (contract item 6), where the scheduler suspends a process whose budget is spent | None | C, B | T1, A6 | 1.0 |
-| Core pinning, topology | Silica | Tested (hints only on macOS) | — | — | — |
-| Placement, balancing, overload protection, runaway watchdog | Part of the BEES scheduler | Absent | B | A6 | 1.0 |
+| Core pinning, topology | Silica. Running raw, a pin is exclusive, because no OS shares the core. OS-hosted, a pin is at most a preference, because the kernel owns the cores (roadmap §4.10). | Tested (hints only on macOS) | — | — | — |
+| Placement, balancing, overload protection, runaway watchdog | Part of the BEES scheduler. OS-hosted: BEAM-style balancing between carrier threads. Running raw: BEAM-style-ish balancing directly onto the cores, written with Silica's `migrate_actor()`, with each migration taking effect at a yield point and pinned processes never moved. | Absent. Spec §15.1.2 makes migration manual-only (`migrate_actor()`); on macOS it sets a thread-affinity hint. | B; U (S-23) for `migrate_actor()` on raw chip cores | A6 | 1.0 |
 | Telemetry | BEES | Absent | B | A5 | 1.0 |
 
 ### 1.8 Distribution and security
@@ -206,15 +206,18 @@ says what BEES does until the item lands. IDs are stable: a withdrawn item keeps
 | **S-19** | A gen_server trait in which one process handles `call`, `cast` and raw messages (`info`) | gen_server belongs in Silica (D5), and OTP's `gen_server` puts all three callbacks in one process. | A4 | `handle_info` messages delivered as casts | Spec §16.2.6.1 (a behaviour is either call-only or cast-only) |
 | **S-20** | *Withdrawn.* Spelling access to Silica's atom table. | Not needed: Silica has no type conversion and BEES adds none, so atom spellings come from the generated atom lookup (roadmap §4.6). | — | — | — |
 | **S-21** | `buf(region, uint8)` across the FFI boundary, as the FFI wrapper spec describes | Whatever still passes through the native edge (TLS records until S-13, file data) must cross as bytes, because binaries are `buf(uint8)` and never Silica strings (roadmap §4.5). | Nothing hard | The edge packs bytes into records of `uint64` words, which BEES unpacks with `shr`, `band` and lookups | FFI wrapper spec §6.2, §6.4 and its type table; `ffi_abi_checker.silica` E2112 (scalars and inline records only at FP1) |
-| **S-22** | Silica's own TCP/IP implementation | Sockets for `prim_inet`, TRUST and BEAM mode, with network bytes delivered as `buf(uint8)`. It retires the native edge's sockets and event-loop entries. | Nothing hard | Native-edge sockets with kqueue/epoll | Planned by the Silica project, not yet in its ROADMAP; spec §20.4 sketches socket operations over `buf(uint8)` |
+| **S-22** | Silica's own TCP/IP implementation | Sockets for `prim_inet`, TRUST and BEAM mode, with network bytes delivered as `buf(uint8)`. It retires the native edge's sockets and event-loop entries. | Nothing hard | Native-edge sockets with kqueue/epoll | Planned by the Silica project, not yet in its ROADMAP; spec §20.4 sketches socket operations over `buf(uint8)`; until it lands on the raw targets, sockets there go through Fifi (S-24) |
+| **S-23** | `migrate_actor()` and exclusive pins on the raw targets (ESP32-S3 and AArch64), with a migration taking effect when the actor next yields | Running raw, the BEES scheduler balances directly onto the cores, and `migrate_actor()` is the only way anything changes core (roadmap §4.10). | A6 (raw) | None; running raw, processes stay where they were spawned | Spec §15.1.2 (manual `migrate_actor()`, `pin_actor_to_core()`); the ESP32-S3 port runs a cooperative scheduler on one core (`esp32s3_port_status.md`) |
+| **S-24** | Fifi on the raw targets (ESP32-S3 and AArch64) | To begin with, the raw targets reach the native edge's facilities (sockets, TLS, hashes, random bytes, the clock) through Fifi, with the edge built against each board instead of an OS (roadmap §5, Release 1.0 item 8). | The native edge on the raw targets | None | `esp32s3_port_status.md`: "foreign (C) calls are not supported on this target" (no C runtime; the hosted guarded FFI is setjmp and signal based); `porting_for_os_free_targets.md` lists Fifi as optional for OS-free runtimes; Silica ROADMAP: ESP32-S3 FP1 replaces "Fifi against OS libraries" with board-pack equivalents |
 
 ---
 
 ## 4. Native edge inventory
 
-The native edge is one C archive, `libdangerous_bees_native.a`. Silica code reaches it only through
-`dangerous_bees_*` wrapper modules and `spawn_dangerous` workers, and every value it returns reaches actors only
-through `bees_ingress`. Byte payloads cross the boundary as `buf(uint8)` (pointer and length) once S-21 lands, and as
+The native edge is one C archive, `libdangerous_bees_native.a`, reached through Silica's Fifi. It is built for each
+target: against the OS on the hosted targets, and against the board on the raw targets, ESP32-S3 and AArch64 (Fifi
+there is S-24). Silica code reaches it only through `dangerous_bees_*` wrapper modules and `spawn_dangerous` workers,
+and every value it returns reaches actors only through `bees_ingress`. Byte payloads cross the boundary as `buf(uint8)` (pointer and length) once S-21 lands, and as
 records of `uint64` words until then; they are never Silica `string` values. Structured results cross as flat
 records.
 
