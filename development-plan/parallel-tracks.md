@@ -111,6 +111,17 @@ These contracts are the **integration surface** between the tracks. Changes to t
 
 ---
 
+## What both tracks depend on: Silica prerequisites
+
+Some BEAM capabilities are promised by the Silica specification but not yet delivered by its runtime. Examples are
+links and monitors, lightweight actors multiplexed on carrier threads, and byte-level string access. A library cannot
+supply these, because they live in compiler-emitted runtime code. The [roadmap](roadmap.md) tracks them as a third
+work stream, **Track S**, which is carried out in the Silica repository under Silica's own rules. Both tracks list
+the Track S items they block on. The full inventory is in the [gap ledger](gap-ledger.md), and the two distribution
+modes are designed in [inter-nodal-modes.md](inter-nodal-modes.md).
+
+---
+
 ## Summary
 
 
