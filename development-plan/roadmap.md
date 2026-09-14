@@ -1,15 +1,15 @@
 # BEES Roadmap — Proof of Concept to Complete Library
 
-This document is the master plan for Project BEES. It takes BEES from a proof of concept to a complete library
-that can stand where a BEAM would, and it records who closes each gap between "what Silica provides" and "what a
-BEAM-idiom program needs."
+This document is the master plan for Project BEES, from proof of concept to a complete library. It also records, for
+each gap between what Silica provides and what compiled BEAM-language code needs, who closes that gap.
 
-It builds on [parallel-tracks.md](parallel-tracks.md), which remains authoritative on **how the work is organized**
-(Track A on-node, Track B inter-nodal, developed in parallel). Companion documents:
+It builds on [parallel-tracks.md](parallel-tracks.md), which remains authoritative on **how the work is organized**.
+Companion documents:
 
-- [gap-ledger.md](gap-ledger.md) — every BEAM capability, its status in Silica today, who owns closing it, and when.
-- [inter-nodal-modes.md](inter-nodal-modes.md) — the two distribution modes: **SEMP/TRUST** (default) and
-  **standard BEAM distribution** (explicit downgrade / OTP interop).
+- [gap-ledger.md](gap-ledger.md) — how each BEAM construct maps onto Silica, what Silica provides today, and who owns
+  each gap.
+- [inter-nodal-modes.md](inter-nodal-modes.md) — the two distribution modes: **SEMP/TRUST** (the default) and
+  **standard BEAM distribution** (an explicit downgrade, and the mode for OTP interop).
 
 All statements about Silica below were checked against the Silica repository at Apple Silicon **fixed point 1**
 (commit `8aff9cdc5`, 2026-09-13; 33,824 trials green). Where the Silica specification and the implementation
@@ -17,299 +17,368 @@ disagree, this plan follows the implementation and the trials, and names the spe
 
 ---
 
-## 1. What "replace the BEAM with a library" means
+## 1. Purpose
 
-BEES is **not** a bytecode VM. It does not load `.beam` files or run Erlang/Elixir source. It is a set of Silica
-modules an application includes so that a program written in the **BEAM idiom** — processes as actors, links and
-monitors, supervision, timers, registered names, OTP-style behaviours, distribution — runs natively on Silica, with
-no VM underneath.
+**BEES is the shim that lets BEAM languages be compiled to Silica and its constructs.** It is not an attempt to
+reproduce the BEAM's code API for Silica programmers.
 
-Interoperability with real Erlang/OTP systems happens **on the wire**, through standard BEAM distribution mode, not
-by executing Erlang code.
+The BEAM has two parts, and each is replaced differently:
+
+- **The emulator** (the bytecode interpreter) is replaced by **compilation**. Each BEAM language gets its own
+  language-to-Silica compiler (Erlang, Elixir, Gleam, LFE). **Those compilers are outside the scope of BEES.** They
+  are separate projects, and all of them target one BEES **target contract**.
+- **The runtime system (ERTS)** is replaced by **Silica constructs wherever they exist** and by the **BEES shim
+  wherever they do not.**
+  - Silica supplies: processes (actors), supervision, gen_server, state machines, links, monitors, registries, and
+    crash containment.
+  - The BEES shim supplies the BEAM-specific parts of ERTS: **the multi-core scheduler** (D3), the term model, atoms,
+    BIFs, ETS, timers, ports, and distribution (including SEMP/TRUST).
+
+```mermaid
+graph LR
+  subgraph "Outside BEES — one compiler per language"
+    ERL[Erlang → Silica] 
+    EX[Elixir → Silica]
+    GL[Gleam → Silica]
+    LFE[LFE → Silica]
+  end
+  CONTRACT[[BEES target contract]] -.specifies.-> ERL & EX & GL & LFE
+  ERL & EX & GL & LFE --> GEN[generated Silica<br/>plain Silica actors<br/>+ calls into BEES]
+  GEN --> SC[Silica compiler]
+  SHIM[BEES shim<br/>Silica library] --> SC
+  CFG[bees_config<br/>program-wide tables] --> SC
+  EDGE[(BEES native edge<br/>C archive)] --> EXE[native executable]
+  SC --> EXE
+```
+
+The **target contract** is the specification that lets independent compilers interoperate in one program. For
+example, Elixir code calls Erlang's `lists` module, and both are compiled by different compilers. The contract fixes:
+
+1. **Term representation.** The `bees_term` layout as Silica types, and the API for the shared atom table.
+2. **Process model.** A BEAM process is a **plain Silica actor** whose messages are `bees_term` values. Code that does
+   not fit Silica's once-per-message behaviour (a `receive` in the middle of a function, for example) is **reshaped by
+   the compiler** (D1). The compiler keeps the paused computation in the actor's state and uses BEES's runtime
+   helpers: the save queue for selective receive, the `after` timers, and memory evacuation.
+3. **Calling convention.** How arguments are passed (including how more than 8 of them are packed), how results and
+   exceptions are returned (D2), and how BIFs are named and called.
+4. **Dynamic calls.** Each compiled module provides dispatch entries for `apply/3` and for its funs, together with a
+   manifest. `bees_config` combines the manifests into a program-wide module table. BEES itself relies on that table
+   (for TRUST, remote spawn, and `spawn/3`).
+5. **OTP behaviours.** How `supervisor`, `gen_server` and `gen_statem` callback modules are expressed as
+   implementations of Silica's `Supervisor`, gen_server and state-machine traits.
+6. **Memory and preemption.** Where compilers place **evacuation points** and **yield points**, and which BEES API
+   calls go at each (§4.2, §4.3). Both kinds of point sit at receive boundaries and tail calls, where the reshaped code
+   holds every live value explicitly. At a yield point a process whose dispatch budget is spent suspends, exactly as
+   it would at a `receive`, and the BEES scheduler runs something else.
+7. **Naming.** A reserved module-name prefix for each language, plus BEES's own `bees_` prefix.
+8. **Versioning.** The contract has its own version, and BEES reports which contract versions it supports.
+
+No `.beam` file is loaded at run time and no bytecode is interpreted. Running Erlang/OTP systems are reached on the
+wire, through standard BEAM distribution mode.
 
 ## 2. The ownership rule
 
-BEES contains **only the portions of the BEAM that Silica lacks**. Reading the Silica spec against the Silica runtime
-shows three different kinds of "lack", and each has a different owner:
+BEES contains **only the portions of the BEAM that Silica lacks.** Every gap belongs to exactly one class:
 
-| Class | Meaning | Owner | Example |
+| Class | Meaning | Owner | Examples |
 | --- | --- | --- | --- |
-| **U — Upstream** | Silica's spec promises it, but the runtime or compiler does not deliver it yet. A library *cannot* supply it, because it lives in compiler-emitted runtime code. | Silica repository; BEES tracks it as a prerequisite (Track S below) and may contribute the work there. | `link`/`monitor`/`demonitor` are typed but are no-op stubs in `prims_actors_runtime_asm.silica`; spec §15.1.2.2 promises actors that are "not OS threads" but `spawn` is `pthread_create`. |
-| **B — BEES-owned** | Neither implemented nor specified in Silica, and belongs above the language. | BEES, permanently. | Timers, trap-exit, gen_statem, distribution, TRUST, ETF, node identity. |
-| **E — Native edge** | Needs OS or cryptographic facilities Silica has no primitive for. Lives in one audited C archive behind `dangerous_bees_*` wrappers, each function with a named retirement trigger. | BEES, temporarily. Each item retires when its Silica replacement lands. | TCP sockets, kqueue/epoll, TLS 1.3 engine, SHA-512, CSPRNG, monotonic clock. |
+| **U — Upstream** | Missing in Silica, but Silica is where it belongs. Either Silica's spec promises it and the runtime or compiler does not deliver it yet, or it belongs alongside what Silica already provides. A library cannot supply it. | The Silica repository. BEES tracks it as a prerequisite (Track S) and may contribute the work there. | **gen_server and state machines** (beside the `Supervisor` trait); links, monitors and trap-exit (stubs today); the **scheduler interface** that lets BEES run actors (today every actor is its own pthread); bignums; byte access; region release. |
+| **B — BEES shim** | BEAM-specific runtime semantics with no place in Silica. | BEES, permanently. | **The multi-core scheduler** (D3); the `bees_term` model and Erlang term order; the atom table; BIFs; ETS; timers; the receive helpers; the process dictionary helpers; ETF; TRUST; BEAM distribution; `bees_config`. |
+| **C — Compiler** | Supplied by how a language compiler translates code. | **Each language's compiler, outside BEES.** BEES specifies the obligation in the target contract. | Pattern matching; reshaping code around `receive`; `try`/`catch` lowering; defunctionalized funs; per-module dispatch entries; placing evacuation points; compiling each language's standard library, and OTP's Erlang libraries. |
+| **E — Native edge** | Needs OS or cryptographic facilities Silica has no primitive for. One audited C archive behind `dangerous_bees_*` wrappers. Every function has a named retirement trigger. | BEES, temporarily. | TCP sockets, kqueue/epoll, TLS 1.3 engine, SHA-512, MD5, CSPRNG, monotonic clock. |
 
-Two consequences follow:
+Consequences:
 
-- **BEES does not ship a second actor runtime.** A BEES process is a Silica actor. Supervisors, the `Supervisor`
-  trait, `call`/`cast`, registries and crash containment are Silica's; BEES builds on them. The multi-core scheduler
-  the BEAM is famous for is a **Silica runtime** deliverable (class U), with BEES writing the requirements and owning
-  the *policy* layered above it (placement, balancing, overload). Decision gate **D1** (§6) covers the fallback if
-  Silica declines that work.
-- **BEES code is written in Silica; the native edge is kept deliberately small.** "Don't roll your own crypto" and the
-  Silica TLS design note (`design_documents/tls_quantum_safe_future.md` §2–3: "wrap an engine") both require a vetted
-  TLS engine. Everything that *can* be Silica is Silica.
+- **A BEAM process is a plain Silica actor** (D1, decided). BEES does not wrap actors, ship a second actor runtime, or
+  keep a process-object layer. A local pid *is* an `actor_ref`.
+- **BEES owns the scheduler** (D3, decided). It provides per-core carrier threads, run queues, work stealing,
+  fairness, a dispatch budget standing in for reductions, priorities, affinity and migration, and a separate pool for
+  blocking and dangerous actors. It schedules plain Silica actors through a **scheduler interface in the Silica
+  runtime** (S-6). The Silica runtime keeps mailboxes, links, monitors and crash containment; BEES decides which actor
+  runs, where, and for how long. The exact shape of that interface is D15.
+- **OTP behaviours are Silica traits** (D5, decided). `gen_server`, `gen_statem` and `supervisor` callback modules are
+  compiled to Silica's gen_server, state-machine and `Supervisor` traits, not to OTP's Erlang implementations of
+  those behaviours.
+- **OTP's Erlang libraries are compiled code, not BEES code.** Examples are `lists`, `gen_tcp`, `logger`, `erpc`,
+  `global` and `pg`. The Erlang-to-Silica compiler compiles them. BEES provides the ERTS layer underneath them: BIFs,
+  `prim_inet`, `prim_file`, and the distribution BIFs.
+- **BEES is written in Silica, and the native edge is kept small.** "Don't roll your own crypto," and Silica's own TLS
+  design note says to wrap a vetted engine (`tls_quantum_safe_future.md` §2–3).
 
-## 3. Three work streams
+## 3. Work streams and external dependencies
 
-[parallel-tracks.md](parallel-tracks.md) defines Tracks A and B. This plan adds a third stream it depends on but
-does not own:
+[parallel-tracks.md](parallel-tracks.md) defines Tracks A and B. This plan adds two more streams and names one
+external dependency.
 
-- **Track A — On-node** (BEES repo). Process surface, lifecycle, time, behaviours, local stores, I/O, observability,
-  scheduling *policy*.
-- **Track B — Inter-nodal** (BEES repo). Node identity, the two distribution modes, wire codecs, cluster semantics.
-- **Track S — Silica prerequisites** (Silica repo). The class-U items in the [gap ledger](gap-ledger.md#3-track-s--silica-prerequisites).
-  BEES files them as the smallest reasonable proposals, supplies reproducing trials, and may implement them, under
-  the Silica project's own rules (fixed points, trial goldens, and `AI_POLICY.md`: human-vetted, no AI co-authors,
-  smallest reasonable PRs).
+- **Track A — On-node shim** (BEES repo). Terms and memory; the runtime helpers for processes and signals on plain
+  Silica actors; BIFs and ERTS-level modules; the mapping of OTP behaviours onto Silica traits; host I/O;
+  observability; **the scheduler**.
+- **Track B — Inter-nodal** (BEES repo). Node identity, the two distribution modes, and the wire codecs.
+- **Track T — Target contract** (BEES repo). The contract specification and a **conformance kit**. The kit contains
+  reference lowerings: hand-written Silica showing exactly what a compiler should emit for each construct. It also
+  contains a test suite a compiler can run to check itself against BEES. Track T is also how BEES tests itself before
+  any compiler exists.
+- **Track S — Silica prerequisites** (Silica repo). The class-U items in the
+  [gap ledger](gap-ledger.md#3-track-s--silica-prerequisites). BEES files each one as the smallest reasonable proposal,
+  with a reproducing trial, and may implement it. That work follows Silica's own rules: fixed points, trial goldens,
+  and `AI_POLICY.md` (human-vetted, no AI co-authors, smallest reasonable PRs).
+- **External dependency: the language compilers.** They are not BEES work. BEES publishes the contract early (Stage
+  0), keeps it stable, and uses the first available compiler (expected to be Erlang's) as its integration partner
+  (I3).
 
-Track S is where BEES's schedule risk lives. Every milestone below lists the S-items it blocks on, so a slip upstream
-is visible immediately rather than discovered late.
+Schedule risk lives in Track S and in the external compilers. Every milestone below lists what it blocks on.
 
-## 4. Engineering constraints that shape every milestone
+## 4. Engineering constraints
 
-These come from the FP1 toolchain as it is, not the spec. Each one is a design rule for BEES code until the named
-Silica item removes it.
+These come from the FP1 toolchain as it actually is, not from the spec. Each one is a design rule for BEES, and for
+the contract, until the named item removes it.
 
-1. **Per-actor arena memory is never reclaimed while the actor lives** (bump allocator, 8 MB committed, freed at
-   death). *Rule:* long-lived BEES actors (listeners, connection owners, registries) must be allocation-light; per-
-   request work runs in **short-lived worker actors**. The TRUST multiplexing design already has this shape (one
-   temporary worker per request). Retires with region release, Silica roadmap chunk 4.
-2. **One OS thread per actor, 512 KB stack, 1 GiB virtual reservation per actor.** *Rule:* the PoC targets thousands
-   of processes, not millions, and spike S3 measures the real ceiling. Retires with S-6 (carrier scheduler) and
-   roadmap chunk 1 (growable stacks).
-3. **Recursion is the only loop, and stacks don't grow yet.** *Rule:* codecs and list walks are written tail-
-   recursively with bounded depth; nesting depth is a checked protocol limit, which is also a security property.
-4. **No generics; polymorphism is traits plus compile-time specialization. No named types (E1047). Max 8 parameters.**
-   *Rule:* BEES behaviours follow the `Supervisor` pattern (`impl MyServer for BeesServer;` plus callbacks); shared
-   shapes are passed as records; the library prefers a few wide envelope records to many narrow ones, to hold down
-   compile RAM.
-5. **No package mechanism.** Consumers splice source paths into their `silica.config`; `wrapper_meta` paths are rooted
-   at the consuming project. *Rule:* every BEES module basename starts with `bees_` (or `dangerous_bees_`) so it is
-   globally unique, and BEES ships its own `bees_config` tool. Retires with S-7.
-6. **Strings are the only byte container crossing FFI, and Silica code has no byte access to them** (no `byte_at`;
-   `substring` counts UTF-8 characters; `buf(uint8)` is rejected at the FFI boundary with E2112; no `bxor`, no bit-
-   casts, no width conversions). *Rule:* binary *decoding* (frames, ETF, X.509) happens in the native edge and
-   crosses into Silica as flat records or token streams; binary *encoding* can be pure Silica. Retires with S-4.
-7. **FFI taint and the `dangerous_` cascade.** Any app that uses BEES networking must name its root module
+1. **Compiled BEAM code is dynamically typed, so every value is a `bees_term`.** BEES is largely monomorphic over one
+   type, which makes Silica's lack of generics mostly irrelevant here. The contract specifies how compilers pack more
+   than 8 arguments, because 8 is Silica's parameter limit.
+2. **Memory must be reclaimed without a garbage collector.** Erlang code allocates constantly. Silica has regions and
+   no GC, and today a per-actor arena is never reclaimed while the actor lives (a bump allocator with 8 MB
+   committed).
+   - *Rule:* a process's terms live in a region held in its actor state. At **evacuation points** the live terms are
+     copied into a fresh region and the old region is released.
+   - The contract places evacuation points at receive boundaries and tail calls. At those points every root is
+     explicit in the reshaped code (D1): the paused computation, the save queue and the dictionary, or the arguments
+     of the tail call.
+   - This is copying collection at points where the compiler knows every root, so no stack scanning is needed. It
+     **requires region release (S-15), which makes S-15 a 1.0 blocker.**
+3. **One OS thread per actor, 512 KB stack, 1 GiB virtual reservation per actor.**
+   - *Rule:* the PoC targets thousands of processes, not millions, and spike S3 measures the real ceiling.
+   - This retires when the BEES scheduler (A6) runs many actors on each carrier thread, which needs the Silica
+     scheduler interface (S-6).
+   - Because of D1, a process holds no stack between messages. A scheduling step is therefore one message dispatch,
+     or one dispatch-budget slice ended at a yield point, and an actor's stack is needed only while that step runs.
+   - Deep body recursion in Erlang (`lists:map` over long lists) still needs growable stacks during a step: roadmap
+     chunk 1, part of S-6.
+4. **Erlang integers are arbitrary precision.** *Rule:* the PoC is limited to `int64`, and overflow raises
+   `system_limit`. Conformance needs Silica bignums (S-11).
+5. **Binaries and bit syntax need byte access that Silica does not have.** Silica has no `byte_at`, `substring` counts
+   UTF-8 characters, and there is no `bxor`, no bit-casts and no width conversions. *Rule:* until S-4 lands,
+   construction is pure Silica and matching and decoding run in the native edge. S-4 is a 1.0 blocker.
+6. **Atoms are compile-time only in Silica, and in the implementation they are numbered per compilation unit.**
+   - *Rule:* BEAM atoms live in one shared, bounded **BEES atom table**. It is seeded from every compiled module's
+     manifest and grows at run time up to a cap.
+   - Where generated code hands an atom to a Silica construct, it uses a Silica atom literal. Spike S2 must show
+     that those literals survive `use` boundaries. If they don't, that is S-1, and it blocks everything.
+7. **FFI taint and the `dangerous_` cascade.** Any app that uses BEES networking has a root module named
    `dangerous_*`. FFI-derived data may not be sent to an ordinary actor *directly*, but it **may be copied, and the
-   copy sent**. *Rule:* every byte that enters through the native edge reaches ordinary actors only through the
-   **BEES copy gate** (`bees_ingress`), a B-class component that performs the copy and builds the safeguards into it.
-   This is the same copy / validate / re-encode discipline the brokered-IPC design gives its broker, done in-process.
-   - Enforce hard size caps before copying.
-   - Bound structure depth and element counts.
-   - Validate UTF-8 wherever text is expected.
-   - Keep remote atoms as strings; never intern them.
-   - Validate each endpoint's schema.
-   - Construct fresh Silica values; no FFI-owned bytes survive into the copy.
-   - On any failure, drop the input, write an audit log entry, and apply suspicion, with nothing sent back to the
-     peer.
-
-   The gate is a security boundary. It is fuzzed like one, and there is no other path in.
-8. **Atoms are compile-time only, and are numbered per compilation unit in the implementation** (contradicting spec
-   §4.1.7's global table). *Rule:* remote atoms are **strings** in BEES (which also makes atom-table exhaustion
-   attacks impossible by construction), and spike S2 must establish whether atoms survive `use` boundaries between BEES
-   and application modules. If they don't, that is S-1 and blocks everything.
-9. **No CI.** Silica's "CI" is a human-run `make integrate` (about 1 hour) on Apple Silicon. *Rule:* BEES keeps its
-   own trial tree in Silica's format (`.silica` + `.scout` / `.golden_fail`), pins the compiler binary it was
-   verified with, and re-runs the tree on every compiler bump.
+   copy sent**. *Rule:* everything that enters through the native edge reaches actors only through the **BEES copy
+   gate** (`bees_ingress`). The gate enforces size caps, depth and count bounds, UTF-8 validity, and the atom-creation
+   policy, and it builds fresh `bees_term` values. On any failure it drops the input silently toward the peer and
+   writes an audit entry. It is a security boundary: fuzzed as one, with no other path in.
+8. **There is no package mechanism.** *Rule:* every BEES module basename starts with `bees_` (or `dangerous_bees_`).
+   `bees_config` assembles the consumer's `silica.config` from BEES and the compilers' output, and generates the
+   program-wide module and atom tables. It retires with S-7.
+9. **There is no CI.** Silica's "CI" is a human-run `make integrate` of about an hour on Apple Silicon. *Rule:* BEES
+   keeps its own trial tree in Silica's format, pins the compiler generation it was verified with, and re-runs the
+   tree on every compiler bump.
 
 ---
 
 ## 5. Milestones
 
-Stages 0 and 1 are shared. After the proof of concept, Track A and Track B proceed **in parallel** (per
-parallel-tracks.md). They meet at two integration points (I1, I2) and then converge in two cross-cutting milestones
-(C1, C2). Track S runs continuously alongside both.
+Stages 0 and 1 are shared. After that, Tracks A, B and T run **in parallel**, with Track S alongside all of them.
+They meet at three integration points (I1–I3), then converge in two cross-cutting milestones (X1, X2). Every
+milestone closes with **trials**, not with code that merely compiles.
 
 ```mermaid
 graph LR
-  M0[Stage 0<br/>Ground truth] --> M1[Stage 1<br/>Proof of concept]
-  M1 --> A1[A1 Lifecycle & time] --> A2[A2 Behaviours & stores] --> A3[A3 Host I/O] --> A4[A4 Observability & policy]
+  M0[Stage 0<br/>Ground truth] --> M1[Stage 1<br/>PoC]
+  M1 --> A1[A1 Terms & memory] --> A2[A2 Processes & signals] --> A3[A3 ERTS modules & BIFs] --> A4[A4 OTP behaviours<br/>on Silica traits] --> A5[A5 Host I/O &<br/>observability]
+  A2 --> A6[A6 Scheduler]
+  M1 --> T1[T1 Contract 1.0] --> T2[T2 Conformance kit]
   M1 --> B1[B1 TRUST 1.0] --> B2[B2 TRUST multiplexing]
   M1 --> B3[B3 BEAM mode L1–L2] --> B4[B4 BEAM mode L3–L4]
-  A1 --> I1{{I1 Remote lifecycle}}
+  A2 --> I1{{I1 Remote lifecycle}}
   B3 --> I1
-  A3 --> I2{{I2 Network I/O on the event loop}}
+  A5 --> I2{{I2 Network I/O}}
   B1 --> I2
-  I1 --> C1[C1 Cluster semantics]
-  I2 --> C1
-  B2 --> C1
-  A4 --> C2[C2 Scale]
-  C1 --> R1[Release 1.0]
-  C2 --> R1
+  T2 --> I3{{I3 First external<br/>compiler}}
+  EXT([external: Erlang → Silica<br/>compiler]) -.-> I3
+  I1 --> X1[X1 Cluster semantics]
+  I2 --> X1
+  I3 --> X1
+  A6 --> X2[X2 Scale]
+  A4 --> X2
+  X1 --> R1[Release 1.0]
+  X2 --> R1
+  B2 --> R1
   B4 --> R1
-  R1 --> P[Post-1.0: TEMPUS, code upgrade,<br/>cross-node migration, ports]
+  R1 --> P[Post-1.0]
 ```
-
-Every milestone closes with **trials**, not with code that merely compiles. That is the same rule Silica applies to
-its own chunks.
 
 ### Stage 0 — Ground truth
 
-**Goal:** turn the unknowns in §4 into measured facts, set up the repository, and write the four integration
-contracts as Silica types.
-
-Work packages:
+**Goal:** turn the unknowns in §4 into measured facts, set up the repository, and publish contract v0 so that
+compiler projects can start.
 
 - **R0.1 Repository and build.**
-  - Source layout: `src/on_node/`, `src/inter_nodal/`, `src/contracts/`, `native/` (the C edge), `trials/`, `tools/`.
-  - `tools/bees_config.sh` generates a consumer's `silica.config` with BEES sources spliced in, and copies the native
-    edge's `wrapper_meta` sidecars and `libdangerous_bees_native.a` into the consumer's
-    `dangerous_exposure_source/`.
-  - A trial harness mirroring Silica's `trials/silica_compiler.mk` (exit-75 reclaim loop, `.scout` and
-    `.golden_fail` goldens). The harness records the pinned compiler's generation number and hash.
-  - Reuse of prebuilt `.iface`/`.o` files (the `ordered_data_structures/leaf.mk` technique), so that BEES is not
-    recompiled for every application.
-- **R0.2 Feasibility spikes.** Each spike produces a short findings note under `development-plan/spikes/` and at least
-  one trial:
+  - Source layout: `src/shim/`, `src/inter_nodal/`, `src/contracts/`, `contract/` (the specification and the
+    conformance kit), `native/`, `trials/`, `tools/`.
+  - A trial harness mirroring Silica's `trials/silica_compiler.mk` (the exit-75 reclaim loop, `.scout` and
+    `.golden_fail` goldens).
+  - `bees_config`.
+- **R0.2 Feasibility spikes.** Each produces a short findings note under `development-plan/spikes/` and at least one
+  trial.
 
   | Spike | Question | Kills or reshapes |
   | --- | --- | --- |
-  | **S1 Behaviour traits** | Can a *library-defined* trait be implemented by a user module the way `impl X for Supervisor;` works, with trait-typed state and messages specialized at compile time, and does that survive the >32-unit reclaim path? | The whole OTP-behaviour design (A2). |
-  | **S2 Cross-unit atoms** | Does `:timeout` minted in a BEES module compare equal to `:timeout` in an app module, as a message, as a state field, and as a case pattern? | Everything. Failure means filing S-1 as a blocker. |
-  | **S3 Actor ceiling** | Maximum live actors, and RSS/VA per actor, on a 16 GB and a 64 GB Mac. Time to spawn and to deliver one message. | PoC scale targets; urgency of S-6. |
-  | **S4 Native edge** | A `dangerous_bees_native` wrapper (`clock_gettime`, `poll`), called from a `spawn_dangerous` worker. What does the naming cascade and the W4001 warning look like in a two-module consumer app? | Shape of every E-class component. |
-  | **S5 Bytes** | Best representation for frames: `string` produced by the native edge plus records of decoded fields. Prototype a u32 length prefix encoded in pure Silica. | Codec split (native vs Silica). |
-  | **S6 Term model** | `bees_term` as a recursive tagged tuple (`recursive_tuple_specification.md`, `ref?(R, normal, rec)` child/sibling links) versus a flat token list. Measure arena use per decoded term. | Every codec and the remote envelope. |
-  | **S7 Death observation** | Can BEES observe the death of an actor it does not supervise (via a `FailureReporter`, a pending `call`, or anything else) *without* runtime `monitor`? Expected answer: no, which confirms S-2 as a hard prerequisite. | Whether A1 can start before S-2. |
-  | **S8 Copy gate** | A dangerous worker receives FFI bytes; `bees_ingress` copies and validates them into fresh values and casts those to an ordinary actor. Confirm the taint checker accepts the gated path, and pin the rejection of *direct* forwarding with a `.golden_fail` trial. | The ingress path for every E-class component and every remote message. |
+  | **S1 Trait mapping** | Can generated code implement Silica's `Supervisor` trait with `bees_term` state and messages, specialized at compile time, across the >32-unit reclaim path? What must Silica's gen_server and state-machine traits look like to host OTP callback modules? | Contract item 5; the shape of S-17 and S-19. |
+  | **S2 Cross-unit atoms** | Does a Silica atom minted in one unit compare equal in another, as a message, a state field and a case pattern? | Everything. Failure means filing S-1 as a blocker. |
+  | **S3 Actor ceiling** | Maximum live actors, and RSS/VA per actor, on 16 GB and 64 GB Macs; the cost of a spawn and of one message. | PoC scale; the urgency of S-6. |
+  | **S4 Native edge** | A `dangerous_bees_native` wrapper (`clock_gettime`, `poll`) called from a `spawn_dangerous` worker. What do the naming cascade and the W4001 warning look like in a consumer app? | Every E-class component. |
+  | **S5 Bytes** | How far can binaries and bit syntax get before S-4? | A1's binary scope before S-4. |
+  | **S6 Terms and heap** | `bees_term` as a recursive tagged tuple (`recursive_tuple_specification.md`) in a region held in actor state. Can a region be released today? What does an evacuation cost? | Contract items 1 and 6; the urgency of S-15. |
+  | **S7 Death observation** | Can BEES observe the death of an actor it does not supervise without runtime `monitor`? Expected: no, which confirms S-2. | Whether A2 can start before S-2. |
+  | **S8 Copy gate** | FFI bytes → `bees_ingress` → fresh terms → actor. Confirm the taint checker accepts the gated path, and pin the rejection of direct forwarding in a `.golden_fail` trial. | Every remote message path. |
+  | **S9 Reference lowerings** | Hand-lower four small Erlang programs into Silica exactly as the draft contract says a compiler should: a selective receive with `after` in mid-function (reshaped per D1), `try`/`catch` with stack traces, funs with `apply/3`, and binary matching. | Contract items 2–4; the first programs in the conformance kit. |
+  | **S10 Exception representation** | Measure the candidate representations for D2 across BIF calls. | Contract item 3; input to the D2 discussion. |
+  | **S11 Scheduler interface** | Can the Silica runtime let a BEES carrier thread run one message dispatch of a plain Silica actor, keeping Silica's mailbox, links, monitors and crash containment intact? Prototype it in a Silica branch and measure dispatch overhead against thread-per-actor. | D15; the shape of S-6; A6. |
 
-- **R0.3 Integration contracts v0** (the four contracts named in parallel-tracks.md, written as Silica types in
-  `src/contracts/`):
-  - **Identity** `bees_pid`: `{node: string, local: actor_ref, serial: uint64, creation: uint64}`. `node` is empty
-    for local processes. `serial` and `creation` exist so that a restarted actor or a restarted node is never
-    confused with its predecessor.
-  - **Envelope** `bees_envelope`: `{from: bees_pid, to: bees_pid, kind: atom, corr: uint64, body: bees_term}`. It is
-    used by every generic or remote-facing component. Application logic behind an endpoint remains statically typed:
-    the endpoint decodes `body` into its own message type at the boundary, which doubles as schema validation.
-  - **Lifecycle events**: `(:down, monitor_ref, actor_ref, failure_reason)` exactly as spec §15.4.8.6 defines it, plus
-    the BEES `exit` notification for processes that trap exits.
-  - **Placement hook**: `fn place(request: bees_placement_request) -> bees_placement`. Track A answers "which core",
-    Track B answers "which node".
-- **R0.4 Track S ledger filed**: each S-item in the gap ledger becomes a short issue in the Silica repo, with a
-  failing trial attached where one can be written.
+- **R0.3 Contract v0.** Published as `contract/target-contract.md`, covering the eight items in §1, with the S9
+  lowerings as worked examples. It starts from the construct mapping in [gap-ledger §1](gap-ledger.md). The
+  maintainers of the language compiler projects are invited to review it.
+- **R0.4 Track S filed.** Each S-item becomes a short Silica issue, with a failing trial where one can be written.
 
-**Exit criteria:** all eight spike notes merged; decisions D1–D4 (§6) recorded; contracts v0 compile in a trial;
-`bees_config` builds a two-module consumer app against the pinned compiler.
+**Exit criteria:** all eleven spike notes are merged; D2 and D15 are recorded; contract v0 is published and has been
+reviewed by at least one compiler project.
 
-### Stage 1 — Proof of concept: "two nodes, one supervised call"
+### Stage 1 — Proof of concept: "lowered Erlang on two nodes"
 
-**Goal:** a thin vertical slice through both tracks and both distribution modes, proving the architecture end to end.
-Scale and polish are explicitly out of scope.
+**Goal:** a thin vertical slice through the shim, the contract and both distribution modes. Scale and completeness
+are out of scope. The PoC runs the **reference lowerings**: Silica written by hand exactly as contract v0 says a
+compiler would emit. If an external Erlang-to-Silica compiler exists by then, the PoC runs its output too.
 
-- **Track A slice**
-  - `bees_node` boot: read the configuration with `read_lines`, fail fast on invalid values, start the node's root
-    supervisor.
-  - `bees_pid` issuance.
-  - `bees_timer`: `send_after` and `cancel_timer` on a `brodal_okasaki` deadline heap, driven by a native-edge clock
-    and a bounded `poll` tick.
-  - `bees_server`: a gen_server-style behaviour trait (if S1 passes), with call timeouts implemented through
-    `bees_timer`.
-  - Structured logging to stderr.
-- **Track B slice, TRUST**
-  - One request per connection (connect → token → call → close) between two BEES nodes on localhost.
-  - TLS 1.3 mTLS through the native edge.
-  - SHA-512 fingerprint whitelist loaded from the host app's configuration.
-  - Explicit `hello` / `token_present` first frame. The reference implementation's 2-second silence timeout is not
-    ported; see inter-nodal-modes.md §3.6.
-  - Endpoint registry, suspicion counter, and no error bodies on the wire.
-- **Track B slice, BEAM mode**
-  - The BEES node registers with EPMD and completes the distribution handshake with a real `erl -sname` node, using a
-    cookie, in cleartext and loudly logged as a downgrade.
-  - The Erlang node sends `{bees_echo, Node} ! {self(), hello}` and receives the reply.
+- **Track A slice: shim v0.**
+  - `bees_term` for `int64`, atoms, tuples, lists, pids (local `actor_ref`s), and binaries as opaque values;
+  - the shared atom table;
+  - region evacuation at receive boundaries;
+  - the receive helpers (save queue, `after` timer);
+  - `bees_timer` over a native clock;
+  - the BIFs the PoC programs use: `self/0`, `spawn/3` through the module table, `element/2`, `length/1`, send, and
+    an `io:format/2` subset;
+  - a `supervisor` callback module as a Silica `Supervisor` trait implementation.
+- **Track T slice:** contract v0 exercised end to end by the reference lowerings, and `bees_config` generating the
+  program-wide module and atom tables.
+- **Track B slice.**
+  - **TRUST:** lowered Erlang on node A calls `trpc:call(Host, Port, {M,F,A}, Args)`, the BEAM_SEMP API. Node B runs
+    the allowlisted function through the module table, in a per-request worker. The call uses TLS 1.3 mTLS, the
+    fingerprint whitelist, and the token path.
+  - **BEAM mode:** a lowered Erlang process on a BEES node exchanges messages with a process on a real `erl -sname`
+    node, in cleartext and loudly logged as a downgrade.
 
 **Exit criteria:**
 
-- a scripted demo and its trials;
-- the handshake and request latencies measured;
-- every native-edge value reaches an ordinary actor only through `bees_ingress` (§4 item 7), and a `.golden_fail`
-  trial shows that direct forwarding is rejected;
-- the gap ledger updated with anything the PoC discovered.
+- Three Erlang programs produce the same output on BEES, as reference lowerings, as they do on the BEAM: a ping-pong
+  with selective receive, a process ring, and a supervised worker restarted after a crash.
+- Latency and per-process memory are measured.
+- Every native-edge value reaches actors only through `bees_ingress`.
+- The gap ledger is updated.
 
-### Track A milestones — On-node
+### Track A — On-node shim
 
 | ID | Milestone | Contents | Blocks on | Exit criteria |
 | --- | --- | --- | --- | --- |
-| **A1** | Lifecycle and time | Links, monitors and exit signals adopted from Silica once S-2 lands, with BEES adding: **trap-exit** (exits delivered as messages to opted-in processes), `bees_exit/2` producing `(:explicit, atom)`, `is_alive`. Time: monotonic and system time, `send_after`/`start_timer`/`cancel_timer`/`read_timer`, sleep, behaviour-level receive timeouts (`timeout` returned from a callback, as in gen_server). Registry extensions: string names, auto-unregister on death, `via`-style name resolution hooks. | S-1, S-2, S-3 (the native clock stands in for S-3) | Trials for each link/monitor/trap-exit rule in spec §15.4.8 plus the BEAM behaviours BEES adds; timer accuracy measured. |
-| **A2** | Behaviours and stores | `bees_server` (gen_server), `bees_statem` (gen_statem, including state timeouts; this is what the TRUST connection FSM is built on), `bees_event` (gen_event), `bees_task`, `bees_app` (application: start order, environment, config validation, stop). `bees_table`: ETS-like tables owned by an actor over `wbt_map` (`set`, `ordered_set`, `bag`, with explicit statements of what cannot match ETS, such as concurrent reads), and boot-time constant terms (`persistent_term` analogue). | S1 findings; S-9 (explicit stop) | Each behaviour has a trial suite ported from the corresponding OTP documented contract; TRUST's FSM runs on `bees_statem`. |
-| **A3** | Host I/O | `bees_io`: one event-loop actor per core over kqueue (macOS) or epoll (Linux), in the native edge. Ports as actors, with BEAM `{active, once}` semantics for backpressure. File I/O beyond Silica's `read_lines`/`append_file`. Sockets (TCP/UDP) as ports. | S-4 for the pure-Silica parts | A TCP echo server with 1,000 concurrent connections; backpressure trial showing a slow consumer pausing reads. |
-| **A4** | Observability and scheduling policy | Logger (levels, handlers, structured fields, rate limiting, redaction), telemetry events, process introspection (`process_info` analogue: pids, registered names, message counts where the runtime exposes them), crash reports wired to Silica's `FailureReporter`, tracing hooks. Policy: placement hook implementations, affinity and balancing through `migrate_actor`/`pin_actor_to_core`, overload protection, a watchdog for runaway handlers. | S-8 (mailbox introspection) | An operator can list a node's processes and follow one request end to end through logs and telemetry. |
+| **A1** | Terms and memory | All `bees_term` types; Erlang term order and both equalities; the atom table with its cap; maps in term order over `wbt_map`; the bit-syntax runtime; bignums; `term_to_binary`/`binary_to_term` (with `safe`); the evacuation API. | S-4, S-11, S-15 | Term-order and bit-syntax trials derived from OTP's `erts` test suites. A long-running process's memory stays flat under load. |
+| **A2** | Processes and signals | Runtime helpers for plain Silica actors: the save queue and `after` timers for reshaped `receive`; the process dictionary helpers; conversion between Silica's lifecycle events and Erlang terms (`'DOWN'`, `{'EXIT', Pid, Reason}`) on top of Silica's links, monitors and trap-exit (S-2, S-9); `exit/2`; `spawn`/`spawn_link`/`spawn_monitor`/`spawn_opt` BIFs over Silica spawn; registered names over the atom table; timers (`send_after`, `start_timer`, `cancel_timer`, `read_timer`); `process_info`, `processes/0`, `is_process_alive/1`. | S-2, S-9; S-3 (the native clock stands in) | Signal and receive trials derived from OTP's process and signal test suites, as reference lowerings. |
+| **A3** | ERTS modules and BIFs | The `erlang` module's BIFs, in coverage tiers. `ets` (actor-owned tables over `wbt_map`, with documented concurrency differences). `persistent_term`, `atomics`, `counters`, `os`, `init` and the boot sequence, `code` over the program-wide module table. Handler back ends for compiled `logger`. `crypto` (hash, HMAC, `strong_rand_bytes`) over the native edge. | A1, A2; S-8 | Each BIF tier passes its trial subset. |
+| **A4** | OTP behaviours on Silica traits | The contract's mapping of `gen_server`, `gen_statem` and `supervisor` onto Silica's traits, with reference lowerings. `proc_lib` and `sys` runtime support. Each documented difference from OTP (`hibernate`, `code_change`, `sys` debug) goes in the README. | S-17, S-19, S-2 | OTP behaviour test cases (derived from the gen_server, gen_statem and supervisor suites) pass as reference lowerings, and every exclusion is justified. |
+| **A5** | Host I/O and observability | `bees_io`: one event loop per core (kqueue, epoll) in the native edge. `prim_inet` under compiled `gen_tcp`/`gen_udp`/`inet`, with `{active, once}` backpressure. `prim_file` under compiled `file`. Group leaders and the I/O protocol server. Telemetry. | S-8 | A lowered TCP echo server holds 1,000 concurrent connections; a slow reader pauses its socket. |
+| **A6** | Scheduler | The BEES scheduler over the Silica scheduler interface:<br>• one carrier thread per core;<br>• per-core run queues and work stealing;<br>• a dispatch budget standing in for reductions, enforced at the compilers' yield points (contract item 6);<br>• process priorities;<br>• affinity, placement and migration (the placement hook);<br>• a separate pool for blocking and `spawn_dangerous` actors, including every native-edge worker;<br>• overload protection and a runaway-dispatch watchdog;<br>• scheduler statistics for `erlang:statistics/1` and `erlang:system_info/1`. | S-6 (scheduler interface), D15; A2 | Fairness trials: a CPU-bound process cannot starve its neighbours. Work stealing balances a skewed spawn. 100,000 live processes on a 16 GB Mac. |
 
-### Track B milestones — Inter-nodal
+### Track T — Target contract
+
+| ID | Milestone | Contents | Blocks on | Exit criteria |
+| --- | --- | --- | --- | --- |
+| **T1** | Contract 1.0 | All eight contract items specified completely. That includes cross-language rules: one atom table, one module table, and one exception representation for every language, so that Elixir-compiled code can call Erlang-compiled code. It also includes a versioning and deprecation policy. | A1, A2, A4 | Every construct in gap-ledger §1 whose class is C has a contract section and a reference lowering. |
+| **T2** | Conformance kit | The reference lowerings, plus a self-check suite that a compiler runs against BEES. The suite consists of source programs, expected output and contract assertions. It is packaged so that compiler projects can run it in their own CI. | T1 | The kit runs green on BEES's own reference lowerings. |
+
+### Track B — Inter-nodal
 
 Details are in [inter-nodal-modes.md](inter-nodal-modes.md).
 
 | ID | Milestone | Contents | Blocks on | Exit criteria |
 | --- | --- | --- | --- | --- |
-| **B1** | TRUST 1.0 (single request) | The full `trust/1` wire spec: frames, the hello and token paths, calls and casts. Whitelist, endpoint permissions, forbidden endpoint namespaces. Suspicion and quarantine with the reset policy decided (D6). All timeouts and size limits from the SEMP README, validated at boot with fail-fast. Audit log. Client side: A/AAAA resolution, multi-address attempts with stagger, token cache pinned per server fingerprint, **mutual whitelisting** (the client pins servers too). | A2 (`bees_statem`), native TLS edge | Conformance suite including a negative-path suite (every failure mode listed in the SEMP README yields a close with no error body, plus a log entry and a suspicion change); frame fuzzer runs for 24 hours without a crash. |
-| **B2** | TRUST windowed multiplexing | Everything in the multiplexing design doc: session windows (age, count, idle), GOAWAY with reasons, `max_inflight` with read-pause backpressure, a temporary worker per request under a per-connection supervisor, cancel-by-close, the metrics and telemetry events listed there. Limits set to 1 must reproduce TRUST 1.0 exactly. | B1, A4 | Acceptance criteria 1–10 from the multiplexing design doc as trials; p95 latency improves on the single-request baseline. |
-| **B3** | BEAM mode L1–L2 | EPMD client (and an optional EPMD server). Distribution handshake v6 (cookie challenge). ETF codec. Remote pids, SEND and REG_SEND in both directions. LINK, UNLINK_ID, MONITOR_P, DEMONITOR_P and exit propagation across nodes. Net ticks and nodedown. | A1, S-2 | Interoperability matrix against OTP 26, 27 and 28: messaging, links, monitors and nodedown trials all pass. |
-| **B4** | BEAM mode L3–L4 | SPAWN_REQUEST limited to **exported spawnable endpoints** (so `erpc`/`rpc` from Erlang works against an allowlist; there is no general `apply`). A TLS distribution variant compatible with `inet_tls_dist`. Optional `global`/`pg` compatibility. Scoped downgrade flags. | B3 | Erlang's `erpc:call(BeesNode, M, F, A)` succeeds for exported endpoints and is refused for everything else; the TLS-dist variant interoperates. |
+| **B1** | TRUST 1.0 (single request) | The `trust/1` wire spec. `trpc:call/cast`, the BEAM_SEMP API. Server-side execution of allowlisted MFAs through the module table in a per-request worker. Whitelist, forbidden guard, suspicion and quarantine (D10), tokens, timeouts and limits, fail-fast config, audit log. Client side: A/AAAA resolution, stagger, per-server token cache, mutual pinning. | A2; S-17 soft (until Silica's state-machine trait lands, the connection FSM is a plain behaviour with a phase field); native TLS edge | A negative-path suite: every failure mode in the SEMP README closes the connection with no error body, writes a log entry, and changes suspicion. The frame fuzzer runs 24 hours with no crash. |
+| **B2** | TRUST windowed multiplexing | Everything in the multiplexing design doc: session windows, GOAWAY, `max_inflight` with read-pause backpressure, a worker per request under a per-connection supervisor, cancel-by-close, metrics. Limits set to 1 must reproduce B1 exactly. | B1, A5 | That doc's acceptance criteria 1–10 as trials; p95 latency improves on B1. |
+| **B3** | BEAM mode L1–L2 | EPMD (client, and an optional server). The version 6 handshake. ETF on the wire. Remote pids; sending to pids and registered names; links, monitors and exit signals across nodes; `nodedown`; net ticks. The distribution BIFs (`node/0`, `nodes/0`, `monitor_node/2`). | A2, S-2 | The interoperability matrix against OTP 26, 27 and 28 passes at L1 and L2. |
+| **B4** | BEAM mode L3–L4 | SPAWN_REQUEST through the module table, subject to the scoped `spawn` option. A TLS distribution variant compatible with `inet_tls_dist`. The ERTS hooks that compiled `net_kernel`, `global` and `pg` need. | B3 | Remote spawn works in both directions against Erlang nodes; the TLS variant interoperates. With compiled OTP `erpc`/`global`/`pg`, the tests move into I3. |
 
 ### Integration points and cross-cutting milestones
 
 | ID | What meets | Exit criteria |
 | --- | --- | --- |
-| **I1** Remote lifecycle | A1 lifecycle events × B3 link/monitor control messages. | A local monitor on a remote pid fires with `noconnection` when the peer node dies, and with the peer's reason when the remote process dies. |
-| **I2** Network I/O on the event loop | A3 `bees_io` × B1 TRUST transport. | TRUST and BEAM-mode sockets are ports on the A3 event loop; no distribution component owns a dedicated polling thread. |
-| **C1** Cluster semantics | Node identity and membership, a location-transparent `bees_send`/`bees_call` API that works in both modes (with the mode-specific surface documented), partition semantics, cluster-level observability. | A three-node trial cluster survives a partition and heals, with documented reference, link and monitor behaviour. |
-| **C2** Scale | Silica's carrier scheduler (S-6) and growable stacks (chunk 1) adopted; BEES policy tuned on top of them. Benchmarks against the BEAM on the same hardware: spawn rate, message latency, fairness under a CPU-bound neighbour, 1 million idle processes. | Published benchmark report; decision gate D1 re-evaluated against the numbers. |
+| **I1** Remote lifecycle | A2 signals × B3 control messages | A monitor on a remote pid fires with `noconnection` when the peer node dies, and with the peer's reason when the remote process dies. |
+| **I2** Network I/O | A5 `bees_io` × B1 transport | TRUST and BEAM-mode sockets are ports on the A5 event loop. |
+| **I3** First external compiler | T2 kit × the first language-to-Silica compiler (expected: Erlang) | The compiler passes the conformance kit. It compiles OTP's `stdlib`, the parts of `kernel` BEES supports, and `erpc`/`global`/`pg`. Selected OTP test suites pass on BEES at a published rate, and every failure is mapped to a ledger row or a compiler issue. |
+| **X1** Cluster semantics | Membership, partitions, cluster observability | A three-node cluster mixing BEES and OTP nodes survives a partition and heals, with documented link and monitor behaviour. |
+| **X2** Scale | The BEES scheduler (A6) tuned on Silica's growable stacks (S-6) | Published benchmarks against the BEAM on the same hardware: spawn rate, message latency, fairness under load, 1 million idle processes. |
 
 ### Release 1.0 — definition of "complete library"
 
-BEES 1.0 ships when all of the following hold:
-
-1. Every row of the [gap ledger](gap-ledger.md) marked **1.0** is closed with trials, or explicitly moved out of
-   scope in the README.
-2. TRUST 1.0 and multiplexing (B1, B2) pass their conformance, negative-path and fuzz suites, and an external
-   security review of the TRUST implementation and the native edge has been completed and its findings closed.
-3. BEAM mode (B3, B4) passes the OTP interoperability matrix; the README states exactly which OTP releases and which
-   compatibility levels are guaranteed. That is a tested guarantee, as the README's scope-out requires.
-4. Every native-edge value enters ordinary actors only through the `bees_ingress` copy gate. Every validator in the
-   gate has fuzz coverage, and the gate is inside the external security review.
-5. The native edge inventory is minimal, audited, and every entry has a retirement trigger.
-6. Both Silica hosted AArch64 paths (Apple Silicon and Linux AArch64) pass the BEES trial tree.
-7. The documentation states what is guaranteed, what is compatible with Erlang/OTP concepts, and what is
-   Silica-specific (the README's "documentation of intent").
+1. **Contract.** Contract 1.0 is published, versioned and documented, and the conformance kit is available to
+   compiler projects.
+2. **Shim coverage.** Every gap-ledger row marked **1.0** is closed with trials, or explicitly moved out of scope in
+   the README.
+3. **Compiler integration.** At least one external compiler has passed I3.
+4. **Silica constructs and the BEES scheduler.** BEAM processes are plain Silica actors, run by the BEES scheduler.
+   Supervision, gen_server and state machines run on Silica's traits. BEES duplicates none of them.
+5. **Distribution.** TRUST (B1, B2) passes its conformance, negative-path and fuzz suites. BEAM mode (B3, B4) passes
+   the OTP interoperability matrix.
+6. **Security review.** An external review has covered TRUST, `bees_ingress` and the native edge, and its findings
+   are closed.
+7. **Native edge.** It is minimal and audited, and every entry has a retirement trigger.
+8. **Platforms.** Both Silica hosted AArch64 paths pass the BEES trial tree.
 
 ### Post-1.0
 
-- **TEMPUS**: Cyclon membership with three isolated stores, Ed25519 per-install identity, producer-signed short-lived
-  tokens, proof of possession, attestation hooks.
-- **Code upgrade**: two-version modules and state migration, gated by Silica's `hot_swap` effect and dynamic linking
-  (roadmap chunk 8).
-- **Cross-node placement and migration.**
-- **`trust/2`**: permissioned process messaging over TRUST sessions (links and monitors to exported processes),
-  if D5 says so.
-- **Ports**: Linux x86-64 when Silica has an emitter for it; an ESP32-S3 on-node subset (Track A only) when that
-  Silica path reaches the needed chunks.
-- **Native edge retirement**: move TLS onto Silica TLS intrinsics once `tls_quantum_safe_future.md` is implemented
-  (S-13), and move constant-time comparison onto `CtMask` (S-14).
+- **Hot code upgrade**, on Silica dynamic linking and `hot_swap` (S-12). The contract gains a module-versioning
+  section.
+- **NIFs**, as Silica FFI wrappers (D13).
+- **TEMPUS.**
+- **`trust/2`**, if D9 says so.
+- **Ports** to more Silica emitters.
+- **Native-edge retirement:** TLS moves to Silica TLS intrinsics (S-13), constant-time comparison to `CtMask` (S-14).
 
 ---
 
 ## 6. Decisions
 
-Recommendations are given; the decision is the project's. Each is recorded in this file when made.
+Every decision has a status: **Decided** (with the date), **Open — under discussion**, or **Open**. For an open
+decision, the third column holds a *proposal* to start the discussion from; it is not a recommendation that anything
+depends on yet.
 
-| ID | Decision | Recommendation | Why |
+| ID | Decision | Status and outcome, or proposal | Notes |
 | --- | --- | --- | --- |
-| **D1** | Where does the multi-core scheduler live? (a) Silica runtime carrier threads, as spec §15.1.2.2 already promises, with BEES writing BEAM-grade requirements (per-core run queues, work stealing, a message-dispatch budget as the analogue of reductions, a pool for blocking and dangerous actors) and owning placement policy; or (b) BEES green processes: a pool of per-core Silica actors running BEES processes whose state and messages are `bees_term`. | **(a)**. Keep (b) as the fallback if Silica declines S-6 by the time C2 starts. | A Silica behaviour is a function invoked once per message, with no blocking receive, so (b) is technically possible in a library. But it throws away Silica's static typing for every process and duplicates a runtime Silica has already specified. |
-| **D2** | TLS engine for the native edge. | **rustls** through `rustls-ffi`. The alternative is s2n-tls on aws-lc. Choose the engine Silica's own TLS work (S-13) intends to wrap, so that BEES's edge is a working prototype of it. | Both are named in `tls_quantum_safe_future.md`. rustls is memory-safe, TLS 1.3-only capable, has hybrid PQ key exchange (X25519MLKEM768), supports mTLS with a custom client verifier, and exposes the peer certificate DER for fingerprinting. Its cost is a Rust toolchain at *native-edge build time* only. |
-| **D3** | How do the two modes coexist on one node? | TRUST on by default. BEAM mode is off by default, and is a separate listener with its own configuration block that must be enabled explicitly. Both may run at once. The BEAM-mode listener logs a downgrade banner at start and periodically. | Matches parallel-tracks.md "Opting down to BEAM-equivalent security": off by default, explicit, scoped, documented as a downgrade. |
-| **D4** | TRUST payload encoding. | An **ETF subset**: maps, tuples, lists, integers, floats, binaries, and atoms carried as UTF-8 strings (never interned). No pids, funs, ports or references on the wire. | Keeps the `trust/1` wire readable by Erlang and Swift SEMP clients, as the SEMP README intends; atom-exhaustion attacks are impossible because atoms never become atoms. |
-| **D5** | Does TRUST grow remote links and monitors (`trust/2`)? | Not for 1.0. Revisit after C1. | TRUST's security model rests on short, windowed, permissioned sessions; links and monitors need long-lived connections and would change that model. |
-| **D6** | Quarantine recovery. The SEMP README says both "self-healing" and "quarantined peers require an out-of-system reset." | An out-of-band operator reset only, with suspicion *below* the limit decaying on successful calls, as in the reference code. | Automatic release from quarantine lets an attacker probe on a schedule. |
-| **D7** | Whitelist key. The SEMP README says "SHA-512 of TBSCertificates" in one place and "SHA-512(cert DER)" elsewhere; the code uses cert DER. | SHA-512 of the full certificate DER, with a documented rotation procedure. | It is explicit, matches the code, and makes every certificate reissue a deliberate whitelist change. |
-| **D8** | TEMPUS in 1.0? | Post-1.0. | TRUST plus BEAM mode is already the critical path; TEMPUS depends on Ed25519 and platform attestation, which add more native edge. |
+| **D1** | Process execution model. | **Decided 2026-09-14:** processes are plain Silica actors, and the compiler reshapes whatever does not fit Silica's once-per-message behaviour. BEES provides runtime helpers (save queue, `after` timers, evacuation) and does not wrap actors. | Needs no language change, because Silica forbids user `recv()` (§15.1.2). Every root is explicit at evacuation and yield points (§4.2). A process holds no stack between messages, so a scheduling step is one dispatch. |
+| **D2** | How exceptions cross the contract boundary: BIF failures, `throw`/`error`/`exit`, stack traces. | **Open — under discussion.** Proposal: result-style values, where a call returns either a value or an exception triple `{Class, Reason, Stacktrace}`. Compilers may lower `try`/`catch` however they like, as long as they honour this at contract boundaries. | Spike S10 supplies measurements. |
+| **D3** | Where the multi-core scheduler lives. | **Decided 2026-09-14: in BEES.** Carrier threads, run queues, work stealing, the dispatch budget, priorities, affinity, and the blocking pool are all BEES (A6). They run over a scheduler interface in the Silica runtime (S-6). | How BEES drives plain Silica actors is D15. |
+| **D4** | Language compilers. | **Decided 2026-09-14: out of scope.** Each language has its own language-to-Silica compiler, and BEES owns the target contract they share. | — |
+| **D5** | OTP behaviours. | **Decided 2026-09-14:** gen_server and state machines are Silica constructs beside the `Supervisor` trait (S-17, S-19). | — |
+| **D6** | TLS engine for the native edge. | **Open — under discussion.** Proposal: rustls through `rustls-ffi`, unless Silica's own TLS work (S-13) settles on s2n. | rustls is memory-safe and TLS 1.3 only, supports hybrid X25519MLKEM768 and mTLS with a custom verifier, and exposes the peer certificate DER. The Rust toolchain is needed only to build the native edge. |
+| **D7** | How the two modes coexist on one node. | **Open — under discussion.** Proposal: TRUST is on by default. BEAM mode is off by default and is a separate listener, enabled explicitly, with a downgrade banner. Both may run at once. | Based on parallel-tracks.md, "Opting down to BEAM-equivalent security." |
+| **D8** | TRUST payload encoding. | **Open — under discussion.** Proposal: ETF decoded with `safe` semantics, meaning only existing atoms and no funs. | This is what the BEAM_SEMP reference does. |
+| **D9** | Should TRUST gain remote links and monitors (`trust/2`)? | **Open — under discussion.** Proposal: not for 1.0; revisit after X1. | TRUST's model is short, permissioned sessions. |
+| **D10** | Quarantine recovery. | **Open — under discussion.** Proposal: an operator reset only, while suspicion below the limit decays on successful calls. | The SEMP README contradicts itself on this point. |
+| **D11** | Whitelist key. | **Open — under discussion.** Proposal: SHA-512 of the full certificate DER, with a documented rotation procedure. | The SEMP README describes the key two different ways. |
+| **D12** | TEMPUS in 1.0? | **Open — under discussion.** Proposal: post-1.0. | — |
+| **D13** | NIFs. | **Open — under discussion.** Proposal: not in 1.0. After 1.0, `erlang:load_nif` binds statically linked Silica FFI wrappers. | — |
+| **D14** | Which OTP release's semantics the shim's BIFs follow. | **Open — under discussion.** Proposal: one named release for 1.0, chosen at Stage 0. | BIF semantics drift between OTP releases. |
+| **D15** | How the BEES scheduler drives plain Silica actors. | **Open.** Proposal: the Silica runtime keeps each actor's mailbox, links, monitors, supervision and crash containment. Through a scheduler interface (S-6) it reports "actor X became runnable" to BEES, and exposes "run one dispatch of actor X on this thread." BEES owns the carrier threads, the queues, work stealing, and budgets. | This follows from D1 and D3. Spike S11 prototypes it. |
 
 ## 7. Top risks
 
 | Risk | Effect | Mitigation |
 | --- | --- | --- |
-| A defect in the `bees_ingress` copy gate. | Remote input reaches actors unvalidated. This is the most exploitable bug class in BEES. | One gate, no bypass; the gate stays small; per-validator fuzzing in the trial tree; inside the external review scope. |
-| Track S items slip or are declined (especially S-1, S-2, S-6). | Everything, A1 and C2 respectively stall. | File them early with failing trials; offer to implement; D1 fallback for S-6. |
-| Silent miscompilation in a large library (eight were found in one week in September 2026). | Wrong answers with green BEES trials. | Keep the BEES trial tree broad; minimize any reproducer to a Silica trial immediately; pin compiler generations. |
-| Compile RAM and time grow with library size (inline record types everywhere; the >32-unit reclaim path). | Hour-scale builds, out-of-memory failures. | Prebuilt `.iface`/`.o` reuse; thin dispatcher modules (`thin_dispatchers_for_compile_ram.md`); few wide envelope records. |
-| The native edge grows into a C runtime. | Audit surface and the `dangerous_` cascade grow. | Inventory in the gap ledger; every addition needs a retirement trigger and review. |
-| OTP interoperability drifts (mandatory distribution flags change between OTP releases). | BEAM mode breaks on OTP upgrades. | Interoperability matrix in the trial tree; guarantees stated per OTP release. |
+| No external compiler is ready when the shim is. | I3 and 1.0 slip, and the shim is validated only by hand-written lowerings. | Publish contract v0 at Stage 0; the conformance kit makes a compiler's first steps cheap; the reference lowerings keep BEES testable on its own. |
+| The contract underspecifies something two compilers then do differently. | Code compiled by different compilers cannot interoperate. | Cross-language rules in T1; the conformance kit includes cross-language programs; the contract is versioned. |
+| Region evacuation is too slow, or S-15 is late. | Long-lived processes cannot run. | Spike S6 first; push S-15 early; tune evacuation thresholds in A1. |
+| Track S items slip or are declined (especially S-1, S-2, S-4, S-6, S-11, S-15). | Stage 1, A1, A2, A6 and conformance stall. | File them early with failing trials, and offer to implement them. For S-6, spike S11 produces a working prototype of the interface to propose. |
+| The Silica scheduler interface (S-6) turns out too narrow for a BEAM-grade scheduler. | A6 cannot deliver fairness or scale. | Spike S11 measures before A6 starts. The requirements come from A6's exit criteria, not from Silica's current runtime. |
+| A defect in `bees_ingress`. | Remote input reaches processes unvalidated. | One gate, no bypass, kept small, fuzzed per validator, inside the external review. |
+| Silent miscompilation in the Silica compiler, amplified by the volume of generated code. | Wrong answers even with green trials. | Differential testing against a reference BEAM; minimize any reproducer to a Silica trial immediately; pin compiler generations. |
+| OTP semantics drift. | BIFs diverge from newer OTP releases. | D14 pins one release; the interop matrix is re-run for each new OTP release. |

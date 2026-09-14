@@ -1,6 +1,17 @@
 # BEES Development — Parallel Tracks
 
-The development of Project BEES is organized into **two distinct, independently-progressing tracks**:
+BEES exists so that programs written in **BEAM languages** (Erlang, Elixir, Gleam, LFE) can be **compiled to Silica
+and its constructs**. It is a shim: it supplies what compiled BEAM code needs and Silica lacks. It is not a copy of
+the BEAM's code API for Silica programmers. Each BEAM language has its own language-to-Silica compiler. Those
+compilers are **separate projects, outside BEES**. BEES processes are plain Silica actors.
+
+Two other work streams sit beside the runtime tracks described here, and both are described in the
+[roadmap](roadmap.md):
+
+- **Track T**, the *target contract* that every language compiler targets.
+- **Track S**, prerequisites delivered in Silica itself.
+
+The runtime development of Project BEES is organized into **two distinct, independently-progressing tracks**:
 
 1. The **on-node** track — everything that lives and runs inside a single machine.
 2. The **inter-nodal** track — everything that lives and runs **between** machines.
@@ -13,13 +24,16 @@ The two tracks share a common vocabulary (actors, messages, links, supervision) 
 
 ## Track A — On-Node
 
-**Scope:** the BEAM-style execution surface as it appears on a single host.
+**Scope:** the runtime shim that compiled BEAM-language code needs on a single host.
 
-This track is concerned with how actors are *created*, *scheduled*, *balanced*, *preempted*, *linked*, *supervised*, and *torn down* on one machine. Its success criterion is that a BEAM-idiom program runs correctly and efficiently on a single Silica-backed node, using all available cores, with the scheduling and lifecycle behavior BEAM programmers expect.
+This track is concerned with how BEAM processes, which are Silica actors, are *created*, *scheduled*, *balanced*, *preempted*, *linked*, *supervised*, and *torn down* on one machine, and with the BEAM-specific runtime semantics that compiled code relies on. Its success criterion is that a program written in a BEAM language, compiled to Silica, runs correctly and efficiently on a single node, using all available cores, with the scheduling and lifecycle behavior BEAM programmers expect.
 
 ### Concerns owned by this track
 
-- **Schedulers** — run queues, work-stealing, fairness, preemption points, reduction-style budgeting (or the Silica-appropriate analogue).
+- **Terms & memory** — the universal term type compiled code manipulates, Erlang term order, atoms, maps, binaries and bit syntax, and reclaiming process memory without a garbage collector.
+- **BIFs & ERTS-level modules** — `erlang`, `ets`, `persistent_term`, `os`, `code`, `crypto`, and the other modules the BEAM implements natively rather than in Erlang.
+- **OTP behaviours on Silica constructs** — mapping `gen_server`, `gen_statem`, and `supervisor` modules onto Silica's gen_server, state-machine, and `Supervisor` traits.
+- **Schedulers** — run queues, work-stealing, fairness, preemption points, reduction-style budgeting (or the Silica-appropriate analogue). The scheduler lives in BEES. It runs plain Silica actors through a scheduler interface that the Silica runtime provides.
 - **Multi-core balancing** — distribution of actors across cores, affinitization, locality, migration *between cores on the same node*.
 - **Actor lifecycle** — spawn, exit, normal/abnormal termination, links, monitors, trapping, mailbox semantics.
 - **Supervision integration** — how BEES surfaces interact with Silica's native supervisors and actors.
@@ -42,7 +56,7 @@ The on-node surface is expected to be **self-consistent and useful on its own**,
 
 **Scope:** the distribution-oriented surface between BEES nodes.
 
-This track is concerned with how nodes find each other, how actors are *named* and *addressed* across the network, how messages travel between nodes, and how placement and migration work when "elsewhere" is not just another core but another machine. Its success criterion is that two or more BEES nodes can cooperate as a cluster, exchanging messages and coordinating placement, on top of whatever on-node surface exists at the time.
+This track is concerned with how nodes find each other, how actors are *named* and *addressed* across the network, how messages travel between nodes, and how placement and migration work when "elsewhere" is not just another core but another machine. Its success criterion is that two or more BEES nodes can cooperate as a cluster, exchanging messages and coordinating placement, on top of whatever on-node surface exists at the time, and that BEES nodes can join existing Erlang/OTP clusters when an operator explicitly enables standard BEAM distribution.
 
 ### Concerns owned by this track
 
@@ -111,14 +125,20 @@ These contracts are the **integration surface** between the tracks. Changes to t
 
 ---
 
-## What both tracks depend on: Silica prerequisites
+## What both tracks depend on: compilation and Silica prerequisites
 
-Some BEAM capabilities are promised by the Silica specification but not yet delivered by its runtime. Examples are
-links and monitors, lightweight actors multiplexed on carrier threads, and byte-level string access. A library cannot
-supply these, because they live in compiler-emitted runtime code. The [roadmap](roadmap.md) tracks them as a third
-work stream, **Track S**, which is carried out in the Silica repository under Silica's own rules. Both tracks list
-the Track S items they block on. The full inventory is in the [gap ledger](gap-ledger.md), and the two distribution
-modes are designed in [inter-nodal-modes.md](inter-nodal-modes.md).
+Both runtime tracks serve code produced by the language-to-Silica compilers, which are outside BEES. **Track T**'s
+*target contract* specifies, for every BEAM construct, which Silica construct or shim component the generated code
+targets and what each compiler must emit. The contract is the fifth integration surface, alongside the four above. It
+is also how code compiled from different languages interoperates within one program.
+
+Some things that compiled BEAM code needs belong in **Silica itself** rather than in a library:
+
+- constructs Silica's spec promises but its runtime does not yet deliver (links, monitors, lightweight actors on carrier threads);
+- constructs that belong beside what Silica already has (gen_server and state machines, beside the `Supervisor` trait);
+- language primitives (byte access, big integers, region release).
+
+The [roadmap](roadmap.md) tracks these as **Track S**, carried out in the Silica repository under Silica's own rules. Every milestone lists the Track S items it blocks on. The full construct mapping is in the [gap ledger](gap-ledger.md). The two distribution modes are designed in [inter-nodal-modes.md](inter-nodal-modes.md).
 
 ---
 
@@ -128,9 +148,9 @@ modes are designed in [inter-nodal-modes.md](inter-nodal-modes.md).
 |                                  | Track A — On-Node                                                   | Track B — Inter-Nodal                                                  |
 | -------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | **Domain**                       | One machine                                                         | Between machines                                                       |
-| **Primary concerns**             | Schedulers, cores, lifecycle, local mailboxes, supervision          | Node identity, transport, cross-node addressing, placement, partitions |
+| **Primary concerns**             | Terms and memory, processes and lifecycle, BIFs, OTP behaviours on Silica traits, scheduling policy | Node identity, transport, cross-node addressing, placement, partitions |
 | **Depends on the other?**        | No                                                                  | No                                                                     |
-| **Can ship useful value alone?** | Yes (single-node BEAM-style surface)                                | Yes (against any conforming on-node surface)                           |
+| **Can ship useful value alone?** | Yes (compiled BEAM-language programs on one node)                   | Yes (against any conforming on-node surface)                           |
 | **Meets the other at**           | Actor identity, message envelope, lifecycle events, placement hooks | Same                                                                   |
 
 

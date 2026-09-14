@@ -4,21 +4,24 @@
 
 This file records the **intended scope** of Project BEES.
 
-Project BEES is a **compatibility and execution layer** consisting of a set of files you can include in your Silica application. BEES presents a **BEAM-style surface** for BEAM-idiom programs: **processes as actors**, message passing, and the scheduling and supervision assumptions those models rely on. It is built **in Silica** and is meant to **sit where a conventional BEAM would**, while adding **first-class support for running and balancing work across many cores** and **across a network**—so placement, migration, and integration with I/O and clustering are not afterthoughts.
+Project BEES is the **shim that lets BEAM languages** (Erlang, Elixir, Gleam, LFE) **be compiled to Silica and its constructs**. It is not a reproduction of the BEAM's code API for Silica programmers. Each BEAM language is compiled to Silica by its own language-to-Silica compiler. Those compilers are separate projects, and all of them target the BEES target contract. BEAM processes become plain Silica actors, and OTP's supervisors, gen_servers, and state machines become Silica's own constructs. BEES supplies the rest of what compiled BEAM code needs and Silica lacks: the term model, atoms, BIFs, ETS, timers, ports, and distribution. It is built **in Silica** and is meant to **sit where a conventional BEAM would**, while adding **first-class support for running and balancing work across many cores** and **across a network**—so placement, migration, and integration with I/O and clustering are not afterthoughts.
 
 The name nods to **Bogdan and Björn’s Erlang Abstract Machine (BEAM)**. BEES is not a reimplementation of OTP in full, many parts of which exist in native Silica including actors and supervisors; it is a **focused execution surface** and **shim** that carries that lineage forward in a new substrate.
 
 ## Scope (in)
 
+- **Target contract** — the language-neutral specification that language-to-Silica compilers target. For each BEAM construct it says which Silica construct or BEES component it becomes. It comes with a conformance kit that compilers can check themselves against.
 - **Execution surface** — the boundary at which “BEAM-like” code meets the host: schedulers, actor lifecycle hooks, links, and networking-aware execution (as the project defines them over time).
 - **Multi-core** — **balancing and affinitizing actors** to cores, and policies for fairness, preemption, and locality, appropriate to a Silica-backed runtime.
-- **Networking** — **distribution-oriented paths**: naming or addressing actors across nodes, and protocols or adapters for sending messages and coordinating placement (details evolve with the implementation).
+- **Networking** — **distribution-oriented paths**: naming or addressing actors across nodes, and protocols or adapters for sending messages and coordinating placement. There are two modes: **SEMP/TRUST**, secure by default, of which BEES is the first implementation, and **standard BEAM distribution**, an explicit downgrade for interoperating with Erlang/OTP clusters.
 - **Clear dependency on Silica** — BEES is expected to use Silica for compilation and any runtime pieces that are already in Silica; **its repository** is meant to track the **orchestration layer, APIs, and integration** that are specific to a BEAM-style surface rather than the whole compiler.
 - **Documentation of intent** — what is guaranteed, what is compatible with Erlang/OTP concepts, and what is **Silica-specific** behavior.
 
 ## Scope (out) — for now
 
 - Claiming **bug-for-bug, wire-format, or full OTP compatibility** with any particular Erlang/BEAM release without explicit, tested guarantees.
+- Loading or interpreting `.beam` bytecode at run time. BEAM-language code is compiled ahead of time.
+- The language-to-Silica compilers themselves. Each one is its own project.
 - Replacing the **entire** Silica project; BEES is a **sibling** product and repository whose role is the **actor execution and distribution** story on top of Silica.
 - **Vendor-specific** deployment recipes unless they are clearly optional and documented as such.
 
