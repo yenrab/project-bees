@@ -30,7 +30,7 @@ This track is concerned with how BEAM processes, which are Silica actors, are *c
 
 ### Concerns owned by this track
 
-- **Terms & memory** — the universal term type compiled code manipulates, Erlang term order, atoms, maps, binaries and bit syntax, and reclaiming process memory without a garbage collector.
+- **Terms & memory** — the universal term type compiled code manipulates, Erlang term order, maps, binaries and bit syntax, and reclaiming process memory without a garbage collector. Atoms are not a BEES concern: a BEAM atom is a Silica atom, held in Silica's atom table.
 - **BIFs & ERTS-level modules** — `erlang`, `ets`, `persistent_term`, `os`, `code`, `crypto`, and the other modules the BEAM implements natively rather than in Erlang.
 - **OTP behaviours on Silica constructs** — mapping `gen_server`, `gen_statem`, and `supervisor` modules onto Silica's gen_server, state-machine, and `Supervisor` traits.
 - **Schedulers** — run queues, work-stealing, fairness, preemption points, reduction-style budgeting (or the Silica-appropriate analogue). The scheduler lives in BEES. It runs plain Silica actors through a scheduler interface that the Silica runtime provides.
@@ -134,9 +134,11 @@ is also how code compiled from different languages interoperates within one prog
 
 Some things that compiled BEAM code needs belong in **Silica itself** rather than in a library:
 
-- constructs Silica's spec promises but its runtime does not yet deliver (links, monitors, lightweight actors on carrier threads);
-- constructs that belong beside what Silica already has (gen_server and state machines, beside the `Supervisor` trait);
-- language primitives (byte access, big integers, region release).
+- constructs Silica's spec promises but its runtime does not yet deliver (links, monitors, lightweight actors on carrier threads, byte buffers across the FFI boundary);
+- constructs that belong beside what Silica already has (gen_server and state machines, beside the `Supervisor` trait; Silica's own TCP/IP implementation);
+- language primitives (big integers, region release).
+
+Byte handling is not one of them. Silica has no type conversion and BEES adds none, so each language compiler lowers bit syntax with lookups it generates itself.
 
 The [roadmap](roadmap.md) tracks these as **Track S**, carried out in the Silica repository under Silica's own rules. Every milestone lists the Track S items it blocks on. The full construct mapping is in the [gap ledger](gap-ledger.md). The two distribution modes are designed in [inter-nodal-modes.md](inter-nodal-modes.md).
 

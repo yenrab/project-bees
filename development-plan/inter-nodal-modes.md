@@ -19,8 +19,9 @@ B3 and B4 (BEAM mode) in the [roadmap](roadmap.md). SEMP/TRUST has no implementa
 `BEAM_SEMP` is the **design starting point**, and BEES is the implementation. Where that code disagrees with its own
 documentation, this document follows the documentation. §3.12 lists every such discrepancy.
 
-> **Open decisions.** Where this document cites decisions D6–D11 (the TLS engine, how the two modes coexist, the
-> TRUST payload, `trust/2`, quarantine recovery, and the whitelist key), it describes the current *proposal*. Those
+> **Open decisions.** Where this document cites decisions D6–D11 and D16 (the TLS engine, how the two modes coexist,
+> the TRUST payload, `trust/2`, quarantine recovery, the whitelist key, and atoms not in Silica's atom table), it
+> describes the current *proposal*. Those
 > decisions are open and under discussion ([roadmap §6](roadmap.md#6-decisions)), and this document changes when
 > they are decided.
 
@@ -43,7 +44,7 @@ graph TD
   TR --> CODEC[bees_etf encoder]
   DI --> CODEC
   CODEC --> IO[bees_io ports]
-  IO --> EDGE[(native edge:<br/>sockets, TLS, hashes)]
+  IO --> EDGE[(native edge:<br/>sockets until S-22, TLS, hashes)]
   EDGE -->|FFI-derived bytes| GATE[bees_ingress copy gate]
   GATE -->|fresh, validated bees_term| TR
   GATE --> DI
@@ -61,7 +62,7 @@ therefore depends on the mode:
   1. The server first applies the **forbidden guard**. This is the reference implementation's default map, which
      covers code loading, ports, `apply`, `spawn*`, atom creation, `binary_to_term`, tracing, the registry, timers,
      OS and file access, sockets, and OTP behaviour entry points. BEES extends it with its own internal modules: every
-     `bees_*` module, the generated module-table and dispatch-entry modules, and the `trpc`, `trust_`, `semp_` and `tempus_` prefixes.
+     `bees_*` module, the generated module-table, atom-lookup and dispatch-entry modules, and the `trpc`, `trust_`, `semp_` and `tempus_` prefixes.
   2. It then checks the fingerprint's **permission spec**.
   3. Only then does it call the function through the module table, in a per-request worker process.
 
@@ -73,19 +74,23 @@ therefore depends on the mode:
 
 ### 1.2 The copy gate
 
-Every byte from the network arrives through the native edge. FFI-derived data may be copied and the copy sent, but
-it must never be sent directly. `bees_ingress` is the only place where that copy happens, and it carries the
-safeguards:
+Until Silica's own TCP/IP implementation lands (S-22), every byte from the network arrives through the native edge.
+FFI-derived data may be copied and the copy sent, but it must never be sent directly. `bees_ingress` is the only
+place where that copy happens. Once Silica's TCP/IP carries the traffic, cleartext bytes are no longer FFI-derived,
+but they still reach actors only through `bees_ingress`, which stays the single path for remote input. The gate
+carries the safeguards:
 
 1. **Frame bounds come first.** Reject any length prefix above `frame_size_max`, and any argument payload above
    `args_len_max`, before decoding anything.
 2. **Structural limits during decoding.** Maximum nesting depth, maximum element count per list, tuple and map,
    maximum total terms per frame, and maximum binary size.
-3. **Atom policy.**
-   - In TRUST, only atoms that already exist are accepted. This is the `binary_to_term(Bin, [safe])` rule the
-     reference uses (D8).
-   - In BEAM mode, new atoms are created, as the BEAM does, but only up to the atom table's cap. Reaching the cap
-     closes the connection and writes an audit entry, rather than exhausting memory.
+3. **Atom policy.** BEAM atoms are Silica atoms. Silica's atom table is fixed at compile time, and BEES has no atom
+   table of its own, so the gate never creates an atom. In both modes it looks each spelling up in the program's
+   atom lookup (roadmap §4.6), accepts only atoms found there, and rejects a frame carrying any other atom under
+   item 6 (D16).
+   - In TRUST this is the `binary_to_term(Bin, [safe])` rule the reference uses (D8).
+   - In BEAM mode it is a difference from OTP, which creates new atoms. An OTP peer that sends an atom the program's
+     compiled code never mentions has its frame rejected.
 4. **Type policy.**
    - TRUST accepts no pids, references, ports or funs.
    - BEAM mode accepts all of them. Local funs remain opaque, because their code is BEAM bytecode (gap ledger §5).
@@ -417,8 +422,8 @@ posture when an operator deliberately wants it. It is a **downgrade**, as parall
   | ETF value | `bees_term` |
   | --- | --- |
   | Integers | Small integers; big integers once Silica has them (S-11), and until then any value outside `int64` closes the connection with an audit entry |
-  | `NEW_FLOAT_EXT` | `float64` (the bit-cast happens in the native edge until S-4) |
-  | Atoms | BEES atoms, created up to the table's cap (§1.2) |
+  | `NEW_FLOAT_EXT` | `float64`, decoded in Silica through lookups and exact float arithmetic, with no bit-cast (roadmap §4.5) |
+  | Atoms | The Silica atom that the atom lookup holds for that spelling; a spelling the lookup does not hold is rejected (§1.2) |
   | Binaries, bitstrings | Binaries and bitstrings |
   | Tuples, lists, maps | The corresponding terms |
   | Pids, references, ports | `bees_pid` with its node, and remote references and ports |
@@ -441,7 +446,6 @@ so they cannot be reached from BEAM mode unless an application wraps them in a c
 | --- | --- | --- |
 | `transport` | `tcp` (cleartext, full BEAM parity) or `tls` (compatible with `inet_tls_dist`) | `tls` |
 | `spawn` | `none`, `allowlist` (only MFAs in `spawn_allowlist`), or `any` (BEAM parity) | `none` |
-| `atoms` | `create` (BEAM parity, capped) or `existing` | `create` |
 | `auth` | `cookie` only; there is nothing weaker | `cookie` |
 
 BEAM-mode TLS uses a **compatibility profile** (TLS 1.3, X25519, ECDSA or RSA certificates) so that stock OTP

@@ -29,7 +29,7 @@ the [roadmap](roadmap.md)'s definition of 1.0, and the seed of the target contra
 - **—**: a Silica construct used as-is.
 
 Spec section numbers refer to `silica/compiler/silica-compiler/design_documents/silica-specification.md`. Decisions
-D2 and D6–D14 are still open and under discussion ([roadmap §6](roadmap.md#6-decisions)). Where a row cites one of
+D2 and D6–D16 are still open ([roadmap §6](roadmap.md#6-decisions)). Where a row cites one of
 them, it describes the current proposal.
 
 ---
@@ -49,7 +49,8 @@ them, it describes the current proposal.
 | `try`/`catch`/`throw`/`error`/`exit`, stack traces | Compiler lowering. Result-style values at contract boundaries (D2). | No exceptions (§6.2.3); errors are data | C, B (representation) | T1 | 1.0 |
 | Funs (closures), `fun M:F/A` | A fun term (module, index, captured environment), plus a per-module `apply_fun` dispatch entry | Silica closures cannot escape their frame (defect A2, E1067) | C | T1 | 1.0 |
 | `apply/2,3`, dynamic `M:F(...)` | Per-module dispatch entries, combined by `bees_config` into the program-wide module table | No dynamic dispatch | C, B (`bees_config`) | T1 | 1.0 |
-| Binary construction, bit-syntax matching | The BEES bit-syntax runtime over Silica byte buffers | No byte access, `bxor`, bit-casts or width conversions | U (S-4), B; E for matching until S-4 | A1 | 1.0 |
+| Binary construction, bit-syntax matching | Compiler lowering over binaries held as `buf(uint8)` plus a bit length. Literals become bytes at compile time; run-time values use lookups the compiler generates and same-type arithmetic (roadmap §4.5). | No type conversion, by design (§8.2.3); `buf(uint8)` exists | C | T1 | 1.0 |
+| Integer bitwise operators (`band`, `bor`, `bxor`, `bnot`, `bsl`, `bsr`) | Compiler lowering: an `int64` crosses to `uint64` byte by byte through lookups the compiler generates, Silica's `uint64` operators apply, and the result crosses back. `bxor` is `(a bor b) band bnot (a band b)`. | `bor`, `band`, `bnot`, `shl` and `shr` on `uint64` only (§7.3.1); no `bxor` | C; U (S-11) beyond `int64` | T1 | 1.0 |
 | Maps, map patterns, map updates | BEES term maps: `wbt_map` ordered by Erlang term order | `wbt_map` tested | B | A1 | 1.0 |
 
 ### 1.2 Data
@@ -61,10 +62,11 @@ them, it describes the current proposal.
 | Small integers | Silica `int64` with checked arithmetic | Tested (`checked_int64_add`, `checked_int64_mul`) | — | Stage 1 | 1.0 |
 | Big integers | Silica big integers | Spec (roadmap chunk 7) | U (S-11) | A1 | 1.0 |
 | Floats | Silica `float64` | Tested | — | — | — |
-| Atoms, including `list_to_atom` | One shared BEES atom table: seeded from every module's manifest, capped at run time. Silica atom literals are used wherever a Silica construct needs an atom. | Silica atoms are compile-time only, and numbered per unit in the implementation | B; U (S-1) for identity across units | Stage 1, A1 | 1.0 |
+| Atoms | **Silica atoms**, in Silica's atom table. Compilers emit every atom as a Silica atom literal. BEES has no atom table of its own (roadmap §4.6). | Tested as compile-time constants. The spec's one global table (§4.1.7) is numbered per unit in the implementation. | — ; U (S-1) for identity across units | Stage 1 | 1.0 |
+| `atom_to_list`, `list_to_existing_atom`, `list_to_atom`, and their binary forms | **Lookups, not conversions.** BEES BIFs over the program-wide atom lookup that `bees_config` generates from compiler manifests, pairing each atom literal with its spelling as a string literal (roadmap §4.6). No atom is created at run time: `list_to_atom` returns an atom only if the lookup holds it (D16). | Silica has no type conversion, and BEES adds none | B; C (manifests list atoms) | T1, A1 | 1.0 |
 | Term order, `==` versus `=:=` | BEES comparison over `bees_term` | — | B | A1 | 1.0 |
 | Pids, references, ports | A local pid **is** an `actor_ref`. Remote pids, references and ports are BEES terms carrying node and creation. | `actor_ref` is an opaque local handle | B | R0.3, B3 | 1.0 |
-| `term_to_binary`, `binary_to_term` | BEES ETF codec: the encoder is in Silica; the decoder is in the native edge until S-4 and S-11 | §16.3 contains no serialization | B, E | A1, B3 | 1.0 |
+| `term_to_binary`, `binary_to_term` | BEES ETF codec, encoder and decoder both in Silica, using BEES's own lookups and same-type arithmetic (roadmap §4.5); big integers wait on S-11 | §16.3 contains no serialization | B | A1, B3 | 1.0 |
 
 ### 1.3 Processes and signals
 
@@ -76,12 +78,12 @@ them, it describes the current proposal.
 | `!` (send) | Silica `cast` of a `bees_term` | Tested | — | Stage 1 | 1.0 |
 | Message order per sender/receiver pair | Silica FIFO mailbox | Tested | — | — | — |
 | Links, `spawn_link` | Silica `link` | Stub (spec §15.4.8.4–5) | U (S-2) | A2 | 1.0 |
-| Monitors, `'DOWN'` | Silica `monitor`/`demonitor`; BEES converts Silica's `(:down, …)` into Erlang's `'DOWN'` term | Stub (spec §15.4.8.6) | U (S-2), B (conversion) | A2 | 1.0 |
-| `trap_exit`, `{'EXIT', Pid, Reason}` | Silica trap-exit for ordinary actors, converted into the Erlang term | Absent: only supervisors trap | U (S-9) | A2 | 1.0 |
+| Monitors, `'DOWN'` | Silica `monitor`/`demonitor`; BEES builds Erlang's `'DOWN'` term from Silica's `(:down, …)` event | Stub (spec §15.4.8.6) | U (S-2), B (the `'DOWN'` term) | A2 | 1.0 |
+| `trap_exit`, `{'EXIT', Pid, Reason}` | Silica trap-exit for ordinary actors; BEES builds the Erlang term from the exit event | Absent: only supervisors trap | U (S-9) | A2 | 1.0 |
 | `exit/1,2` with term reasons | Silica exit with an opaque payload that carries the term reason | `failure_reason` is a fixed sum, and `(:explicit, atom)` has no producer | U (S-9) | A2 | 1.0 |
 | `kill` | Silica `kill_abnormal` | Tested | — | — | — |
 | Crash isolation | Silica crash containment and `FailureReporter` | Tested | — | — | — |
-| Registered names | The BEES name table, keyed by atom-table atoms; names known at compile time can use Silica's registry directly | Silica registries tested (compile-time atoms only) | B | A2 | 1.0 |
+| Registered names | The BEES name table (`register/2`, `unregister/1`, `whereis/1`), keyed by Silica atoms; a process registered as it is spawned can use Silica's registry directly | Silica registries tested (registration at spawn) | B | A2 | 1.0 |
 | Timers: `send_after`, `start_timer`, `cancel_timer` | `bees_timer`: a deadline heap (`brodal_okasaki`) over the native clock | Absent | B; E for the clock until S-3 | Stage 1, A2 | 1.0 |
 | Process dictionary | A term map kept in actor state, with BEES helpers for it | — | C, B | T1, A2 | 1.0 |
 | `process_info`, `processes/0`, `is_process_alive/1` | BEES BIFs over Silica actor introspection | Absent | B; U (S-8) for mailbox data | A2, A3 | 1.0 |
@@ -117,8 +119,8 @@ them, it describes the current proposal.
 
 | BEAM construct | On Silica | Silica today | Class | Closed by | Target |
 | --- | --- | --- | --- | --- | --- |
-| `gen_tcp`, `gen_udp`, `inet` | OTP's modules, compiled, over the BEES `prim_inet` layer | Spec §20.4 is a non-normative sketch | C (compiled OTP), B, E | A5, I3 | 1.0 |
-| Event loop; ports with `{active, once}` | `bees_io`, one loop per core | Absent | B, E | A5 | 1.0 |
+| `gen_tcp`, `gen_udp`, `inet` | OTP's modules, compiled, over the BEES `prim_inet` layer, which sits on Silica's own TCP/IP implementation | Planned by the Silica project; spec §20.4 is a non-normative sketch | C (compiled OTP), B; U (S-22); E until S-22 | A5, I3 | 1.0 |
+| Event loop; ports with `{active, once}` | `bees_io`, one loop per core | Absent | B; E until S-22 | A5 | 1.0 |
 | `file` | OTP's module, compiled, over BEES `prim_file` | `read_lines`, `append_file` and `delete_file` only | C, B, E | A5, I3 | 1.0 |
 | Standard I/O and the I/O protocol | BEES I/O server | `print`/`println` | B | Stage 1 subset, A5 | 1.0 |
 | DNS | Native `getaddrinfo` | Spec only | E | B1 | 1.0 |
@@ -161,8 +163,8 @@ them, it describes the current proposal.
 | Component | Class | Milestone | Role |
 | --- | --- | --- | --- |
 | Target contract and conformance kit | B | R0.3, T1, T2 | The specification that all language compilers share, plus reference lowerings and a self-check suite. |
-| `bees_config` | B (tooling) | R0.1, T1 | Assembles `silica.config`; generates the program-wide module table and the atom-table seed from compiler manifests. |
-| `bees_term`, `bees_atom`, `bees_cmp`, `bees_map`, `bees_bits`, `bees_heap` | B | Stage 1, A1 | The term model, atom table, term order, maps, bit syntax, and the evacuation API. |
+| `bees_config` | B (tooling) | R0.1, T1 | Assembles `silica.config`; generates the program-wide module table and atom lookup from compiler manifests. |
+| `bees_term`, `bees_cmp`, `bees_map`, `bees_bits`, `bees_heap` | B | Stage 1, A1 | The term model (atoms are Silica atoms), term order, maps, bit syntax, and the evacuation API. |
 | `bees_etf` | B, E | A1, B3 | `term_to_binary`/`binary_to_term`, and the wire codec. |
 | `bees_recv` (save queue, `after` timers), `bees_pdict`, `bees_signal`, `bees_names`, `bees_timer` | B | Stage 1, A2 | Runtime helpers that reshaped code calls. None of them wraps an actor. |
 | `bees_bif_*`, `bees_table`, `bees_pterm`, `bees_atomics`, `bees_os`, `bees_init`, `bees_code`, `bees_crypto` | B, E | A3 | The ERTS-level modules. |
@@ -183,10 +185,10 @@ says what BEES does until the item lands. IDs are stable: a withdrawn item keeps
 
 | ID | Item | Why BEES needs it | Blocks | Interim | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| **S-1** | Atom identity across compilation units | Generated modules, the shim, and Silica constructs exchange atoms constantly. | Everything, if broken | Spike S2 decides | `stdlib/data_structures/brodal_okasaki.silica:25` versus spec §4.1.7 |
+| **S-1** | Atom identity across compilation units: the one global atom table the spec promises | BEAM atoms are Silica atoms, and BEES has no atom table of its own. Generated modules, the shim, and Silica constructs exchange atoms constantly. | Everything, if broken | Spike S2 decides | `stdlib/data_structures/brodal_okasaki.silica:25` versus spec §4.1.7 |
 | **S-2** | Runtime `link`, `monitor` and `demonitor`, per spec §15.4.8.4–6 | These are the heart of BEAM process semantics, and a library cannot observe the death of an actor it does not supervise (spike S7). | A2, B3, I1 | Supervisor-only lifecycle in the PoC | `Phase2_TODO/actor_monitor_demonitor_todo.md`; the stubs in `prims_actors_runtime_asm.silica` |
 | **S-3** | Monotonic clock, sleep, and timer primitives | Every timeout depends on them. | Nothing hard | Native `clock_gettime` and a bounded `poll` | Spec §22.14 |
-| **S-4** | Byte primitives: byte access to `string`, conversion between `string` and `buf(uint8)`, `bxor`, integer width conversions, and float bit-casts | Bit syntax, and pure-Silica codecs. | **1.0** (A1) | Matching and decoding in the native edge | `utf8_support.md` "Constraint"; `ffi_abi_checker.silica` E2112; spec §8.2.3 |
+| **S-4** | *Withdrawn.* Byte primitives: byte access to `string`, conversion between `string` and `buf(uint8)`, `bxor`, integer width conversions, and float bit-casts. | Not needed. Silica has no type conversion and BEES adds none: compilers lower bit syntax and bitwise operators with lookups they generate, BEES's codecs do the same, and binaries are never Silica strings (roadmap §4.5). What remains is S-21 and S-22. | — | — | — |
 | **S-5** | The taint copy rule pinned in spec text and trials | `bees_ingress` relies on the rule that copying and sending is permitted while sending directly is not. | Nothing, if pinned | BEES's own trials of the rule | FFI wrapper spec §7.2, §7.6, §7.7 |
 | **S-6** | **A scheduler interface** through which a library runs plain Silica actors. The runtime keeps mailboxes, links, monitors, supervision and crash containment, reports when an actor becomes runnable, and lets the library run one dispatch of that actor on a thread the library owns (D15). Also: **growable stacks** (roadmap chunk 1). | The scheduler lives in BEES (D3), and it must run many actors on each carrier thread. Deep recursion needs stacks that grow during a dispatch. | A6, X2; conformance for deep recursion | One thread per actor; PoC scale taken from spike S3 | Spec §15.1.2.2, §23.1.3; `actor_spawn_core_affinity_os_semantics.md`; `actor_growable_stack_design.md` |
 | **S-7** | Library consumption: a search path, `wrapper_meta` paths rooted at the library, and prebuilt library artifacts | Consuming BEES and compiled standard libraries without copying files around. | Nothing hard | `bees_config` | FFI wrapper spec §14.1, §14.3 |
@@ -198,10 +200,13 @@ says what BEES does until the item lands. IDs are stable: a withdrawn item keeps
 | **S-13** | Native TLS intrinsics, with a hook that exposes the peer certificate or its SHA-512 fingerprint | Retiring the TLS native edge; TRUST whitelisting. | Retiring E | rustls through the native edge (D6) | `tls_quantum_safe_future.md` §5 |
 | **S-14** | Crypto labels, `CtMask`, `proc[secret]` (roadmap chunk 9) | Constant-time comparison and zeroization inside Silica. | Retiring E | Native constant-time compare | `crypto-proposal-introduction.md` |
 | **S-15** | Region release inside a living actor (roadmap chunk 4) | Evacuation, BEES's substitute for GC (roadmap §4.2). | **1.0** (A1) | Short-lived processes only | `region_memory_safety_todo.md` |
-| **S-16** | A hash map | O(1) ETS and atom-table operations. | Nothing hard | `wbt_map` | `atom_actor_registry_direct_index_design.md` §1 |
+| **S-16** | A hash map | O(1) ETS operations. | Nothing hard | `wbt_map` | `atom_actor_registry_direct_index_design.md` §1 |
 | **S-17** | A state-machine behaviour trait: states, state and event timeouts, postponement | State machines belong in Silica beside the gen_server-style behaviours and the `Supervisor` trait (D5). `gen_statem` modules and the TRUST connection FSM compile to it. | A4; B1 (soft) | The TRUST FSM as a plain behaviour with an explicit phase field | ROADMAP has no chunk for it yet |
 | **S-18** | *Withdrawn.* A selective-`receive` primitive for stackful processes. | Not needed: D1 decided that processes are plain actors and compilers reshape code. | — | — | — |
 | **S-19** | A gen_server trait in which one process handles `call`, `cast` and raw messages (`info`) | gen_server belongs in Silica (D5), and OTP's `gen_server` puts all three callbacks in one process. | A4 | `handle_info` messages delivered as casts | Spec §16.2.6.1 (a behaviour is either call-only or cast-only) |
+| **S-20** | *Withdrawn.* Spelling access to Silica's atom table. | Not needed: Silica has no type conversion and BEES adds none, so atom spellings come from the generated atom lookup (roadmap §4.6). | — | — | — |
+| **S-21** | `buf(region, uint8)` across the FFI boundary, as the FFI wrapper spec describes | Whatever still passes through the native edge (TLS records until S-13, file data) must cross as bytes, because binaries are `buf(uint8)` and never Silica strings (roadmap §4.5). | Nothing hard | The edge packs bytes into records of `uint64` words, which BEES unpacks with `shr`, `band` and lookups | FFI wrapper spec §6.2, §6.4 and its type table; `ffi_abi_checker.silica` E2112 (scalars and inline records only at FP1) |
+| **S-22** | Silica's own TCP/IP implementation | Sockets for `prim_inet`, TRUST and BEAM mode, with network bytes delivered as `buf(uint8)`. It retires the native edge's sockets and event-loop entries. | Nothing hard | Native-edge sockets with kqueue/epoll | Planned by the Silica project, not yet in its ROADMAP; spec §20.4 sketches socket operations over `buf(uint8)` |
 
 ---
 
@@ -209,20 +214,20 @@ says what BEES does until the item lands. IDs are stable: a withdrawn item keeps
 
 The native edge is one C archive, `libdangerous_bees_native.a`. Silica code reaches it only through
 `dangerous_bees_*` wrapper modules and `spawn_dangerous` workers, and every value it returns reaches actors only
-through `bees_ingress`. Payloads cross the boundary as `string` values (pointer and length); structured results cross
-as flat records.
+through `bees_ingress`. Byte payloads cross the boundary as `buf(uint8)` (pointer and length) once S-21 lands, and as
+records of `uint64` words until then; they are never Silica `string` values. Structured results cross as flat
+records.
 
 | Entry | Purpose | Retires when |
 | --- | --- | --- |
 | `clock_monotonic_ns`, `clock_system_ns`, `poll_wait(ms)` | Time and the timer tick | S-3 |
-| TCP and UDP socket calls; kqueue/epoll registration and wait | `bees_io`, `prim_inet` | Silica networking intrinsics (none are planned yet) |
+| TCP and UDP socket calls; kqueue/epoll registration and wait | `bees_io`, `prim_inet` | Silica's own TCP/IP implementation (S-22) |
 | `getaddrinfo` (A/AAAA records only) | DNS | Silica networking intrinsics |
 | File write, directory operations, file metadata | `prim_file` | Silica `device_io` completion |
 | TLS 1.3 session operations via rustls: configure, handshake, read, write, peer certificate DER and its SHA-512, ALPN | TRUST, BEAM-mode TLS | S-13 |
-| SHA-2 family, MD5, HMAC | `crypto`, certificate fingerprints, the Erlang cookie challenge | S-4 plus S-14 (MD5 stays for as long as BEAM mode exists) |
+| SHA-2 family, MD5, HMAC | `crypto`, certificate fingerprints, the Erlang cookie challenge | S-14 (MD5 stays for as long as BEAM mode exists) |
 | `random_bytes(n)` | `crypto:strong_rand_bytes`, tokens, challenges | S-14 |
 | `ct_equal(a, b)` | Token validation | S-14 |
-| Binary decoding helpers: the ETF token stream, bit-syntax field extraction, float bit patterns | `binary_to_term`, bit-syntax matching | S-4 plus S-11 |
 
 **Rules for the edge:**
 
@@ -241,6 +246,7 @@ Compiling BEAM languages to Silica keeps nearly all of the BEAM's *semantics*. W
 | Feature | Status | Reason |
 | --- | --- | --- |
 | Loading or interpreting `.beam` bytecode at run time | Not supported | Code is compiled ahead of time by the language compilers. |
+| Creating atoms at run time | Not supported. `list_to_atom` and `binary_to_atom` return only atoms the atom lookup holds (D16); the wire accepts only those atoms too. | Atoms are Silica atoms. Silica's atom table is fixed at compile time, and BEES has no atom table of its own. |
 | Calling a local fun received from an Erlang node in BEAM mode | Not supported. The fun is carried as an opaque term, and calling it raises `badfun`. | Its code is BEAM bytecode. Export funs (`fun M:F/A`) work through the module table. |
 | Hot code loading | Post-1.0 (S-12) | Needs Silica dynamic linking. |
 | NIFs | Post-1.0 (D13) | They are written against the BEAM's C API. |

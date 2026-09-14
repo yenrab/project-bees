@@ -29,10 +29,10 @@ The BEAM has two parts, and each is replaced differently:
   are separate projects, and all of them target one BEES **target contract**.
 - **The runtime system (ERTS)** is replaced by **Silica constructs wherever they exist** and by the **BEES shim
   wherever they do not.**
-  - Silica supplies: processes (actors), supervision, gen_server, state machines, links, monitors, registries, and
-    crash containment.
-  - The BEES shim supplies the BEAM-specific parts of ERTS: **the multi-core scheduler** (D3), the term model, atoms,
-    BIFs, ETS, timers, ports, and distribution (including SEMP/TRUST).
+  - Silica supplies: processes (actors), **atoms and the atom table**, supervision, gen_server, state machines, links,
+    monitors, registries, and crash containment.
+  - The BEES shim supplies the BEAM-specific parts of ERTS: **the multi-core scheduler** (D3), the term model, BIFs,
+    ETS, timers, ports, and distribution (including SEMP/TRUST).
 
 ```mermaid
 graph LR
@@ -46,7 +46,7 @@ graph LR
   ERL & EX & GL & LFE --> GEN[generated Silica<br/>plain Silica actors<br/>+ calls into BEES]
   GEN --> SC[Silica compiler]
   SHIM[BEES shim<br/>Silica library] --> SC
-  CFG[bees_config<br/>program-wide tables] --> SC
+  CFG[bees_config<br/>program-wide module table<br/>and atom lookup] --> SC
   EDGE[(BEES native edge<br/>C archive)] --> EXE[native executable]
   SC --> EXE
 ```
@@ -54,7 +54,10 @@ graph LR
 The **target contract** is the specification that lets independent compilers interoperate in one program. For
 example, Elixir code calls Erlang's `lists` module, and both are compiled by different compilers. The contract fixes:
 
-1. **Term representation.** The `bees_term` layout as Silica types, and the API for the shared atom table.
+1. **Term representation.** The `bees_term` layout as Silica types. An atom is a Silica atom: compilers emit every
+   atom as a Silica atom literal, so it is interned in Silica's atom table, and list it in the module's manifest for
+   the atom lookup (§4.6). A binary is a `buf(uint8)` plus a bit length, never a Silica `string`. How a compiler reads
+   and builds those bytes is its own choice (§4.5); the contract fixes only the representation.
 2. **Process model.** A BEAM process is a **plain Silica actor** whose messages are `bees_term` values. Code that does
    not fit Silica's once-per-message behaviour (a `receive` in the middle of a function, for example) is **reshaped by
    the compiler** (D1). The compiler keeps the paused computation in the actor's state and uses BEES's runtime
@@ -82,10 +85,10 @@ BEES contains **only the portions of the BEAM that Silica lacks.** Every gap bel
 
 | Class | Meaning | Owner | Examples |
 | --- | --- | --- | --- |
-| **U — Upstream** | Missing in Silica, but Silica is where it belongs. Either Silica's spec promises it and the runtime or compiler does not deliver it yet, or it belongs alongside what Silica already provides. A library cannot supply it. | The Silica repository. BEES tracks it as a prerequisite (Track S) and may contribute the work there. | **gen_server and state machines** (beside the `Supervisor` trait); links, monitors and trap-exit (stubs today); the **scheduler interface** that lets BEES run actors (today every actor is its own pthread); bignums; byte access; region release. |
-| **B — BEES shim** | BEAM-specific runtime semantics with no place in Silica. | BEES, permanently. | **The multi-core scheduler** (D3); the `bees_term` model and Erlang term order; the atom table; BIFs; ETS; timers; the receive helpers; the process dictionary helpers; ETF; TRUST; BEAM distribution; `bees_config`. |
-| **C — Compiler** | Supplied by how a language compiler translates code. | **Each language's compiler, outside BEES.** BEES specifies the obligation in the target contract. | Pattern matching; reshaping code around `receive`; `try`/`catch` lowering; defunctionalized funs; per-module dispatch entries; placing evacuation points; compiling each language's standard library, and OTP's Erlang libraries. |
-| **E — Native edge** | Needs OS or cryptographic facilities Silica has no primitive for. One audited C archive behind `dangerous_bees_*` wrappers. Every function has a named retirement trigger. | BEES, temporarily. | TCP sockets, kqueue/epoll, TLS 1.3 engine, SHA-512, MD5, CSPRNG, monotonic clock. |
+| **U — Upstream** | Missing in Silica, but Silica is where it belongs. Either Silica's spec promises it and the runtime or compiler does not deliver it yet, or it belongs alongside what Silica already provides. A library cannot supply it. | The Silica repository. BEES tracks it as a prerequisite (Track S) and may contribute the work there. | **gen_server and state machines** (beside the `Supervisor` trait); links, monitors and trap-exit (stubs today); the **scheduler interface** that lets BEES run actors (today every actor is its own pthread); one program-wide atom table; Silica's own TCP/IP; byte buffers across the FFI boundary; bignums; region release. |
+| **B — BEES shim** | BEAM-specific runtime semantics with no place in Silica. | BEES, permanently. | **The multi-core scheduler** (D3); the `bees_term` model and Erlang term order; BIFs; ETS; timers; the receive helpers; the process dictionary helpers; ETF; TRUST; BEAM distribution; `bees_config`. |
+| **C — Compiler** | Supplied by how a language compiler translates code. | **Each language's compiler, outside BEES.** BEES specifies the obligation in the target contract. | Pattern matching; reshaping code around `receive`; `try`/`catch` lowering; defunctionalized funs; per-module dispatch entries; placing evacuation points; bit syntax and integer bitwise operators, through lookups each compiler generates; compiling each language's standard library, and OTP's Erlang libraries. |
+| **E — Native edge** | Needs OS or cryptographic facilities Silica has no primitive for. One audited C archive behind `dangerous_bees_*` wrappers. Every function has a named retirement trigger. | BEES, temporarily. | TCP sockets and kqueue/epoll (until Silica's own TCP/IP, S-22), TLS 1.3 engine, SHA-512, MD5, CSPRNG, monotonic clock. |
 
 Consequences:
 
@@ -156,23 +159,45 @@ the contract, until the named item removes it.
      chunk 1, part of S-6.
 4. **Erlang integers are arbitrary precision.** *Rule:* the PoC is limited to `int64`, and overflow raises
    `system_limit`. Conformance needs Silica bignums (S-11).
-5. **Binaries and bit syntax need byte access that Silica does not have.** Silica has no `byte_at`, `substring` counts
-   UTF-8 characters, and there is no `bxor`, no bit-casts and no width conversions. *Rule:* until S-4 lands,
-   construction is pure Silica and matching and decoding run in the native edge. S-4 is a 1.0 blocker.
-6. **Atoms are compile-time only in Silica, and in the implementation they are numbered per compilation unit.**
-   - *Rule:* BEAM atoms live in one shared, bounded **BEES atom table**. It is seeded from every compiled module's
-     manifest and grows at run time up to a cap.
-   - Where generated code hands an atom to a Silica construct, it uses a Silica atom literal. Spike S2 must show
-     that those literals survive `use` boundaries. If they don't, that is S-1, and it blocks everything.
+5. **Binaries and bit syntax are lowered without type conversion.** Silica has no type conversion (types must match
+   exactly, with no widening: spec §8.2.3), and BEES adds none. Silica's bitwise operators take only `uint64`
+   (§7.3.1), and `substring` counts UTF-8 characters.
+   - *Rule:* a binary is a `buf(uint8)` plus a bit length, never a Silica `string`.
+   - Bit syntax is the **language compiler's** responsibility (class C). Literal binaries, strings and floats become
+     bytes at compile time, in whatever language the compiler is written in. For run-time values, the compiler
+     generates its own **lookups**, for example a 256-entry `case` from a byte to the `int64`, `uint64` or `float64`
+     literal of the same value, and combines them with same-type arithmetic. Each language decides how best to do this.
+   - The same holds for Erlang's integer bitwise operators: Erlang integers are `int64`, and Silica's bitwise operators
+     take `uint64`, so compilers cross between the two byte by byte through their lookups.
+   - BEES's own byte handling (ETF, TRUST framing, EPMD and the handshake, UTF-8 validation in `bees_ingress`) is
+     hand-written Silica using the same technique. The ETF decoder is therefore Silica from the start, not native code.
+   - Bytes enter and leave as `buf(uint8)`. Network bytes come from **Silica's own TCP/IP implementation** (S-22).
+     Anything that still passes through the native edge, such as TLS records until S-13 and file data, needs
+     `buf(uint8)` across the FFI boundary (S-21); until then the edge packs bytes into records of `uint64` words.
+6. **Atoms belong to Silica, and Silica's atom table is fixed at compile time.** The spec interns every atom into one
+   global atom table (§4.1.7). There is no dynamic atom table: nothing adds an atom at run time. In the
+   implementation, atoms are numbered per compilation unit.
+   - *Rule:* a BEAM atom **is** a Silica atom. **BEES has no atom table of its own.** Compilers emit every atom as a
+     Silica atom literal, so a program's atoms are exactly the atoms in its compiled code.
+   - **Silica has no type conversion, and BEES adds none.** `atom_to_list/1`, `list_to_existing_atom/1`, printing and
+     ETF are therefore **lookups**, not conversions. Each compiler lists the atoms its code uses in the module's
+     manifest, and `bees_config` generates a program-wide **atom lookup** from the manifests, beside the module table.
+     The lookup pairs each atom literal with its spelling as a string literal; for example, `atom_to_list` is a `case`
+     over atom literals. It neither interns nor creates atoms: they remain Silica's.
+   - No atom is created at run time. `list_to_atom/1` and `binary_to_atom/2` can only return an atom the lookup already
+     holds (D16), and atoms arriving on the wire are accepted only if the lookup holds them
+     ([inter-nodal-modes §1.2](inter-nodal-modes.md#12-the-copy-gate)).
+   - Spike S2 must show that atoms survive `use` boundaries. If they don't, that is S-1, and it blocks everything.
 7. **FFI taint and the `dangerous_` cascade.** Any app that uses BEES networking has a root module named
    `dangerous_*`. FFI-derived data may not be sent to an ordinary actor *directly*, but it **may be copied, and the
    copy sent**. *Rule:* everything that enters through the native edge reaches actors only through the **BEES copy
-   gate** (`bees_ingress`). The gate enforces size caps, depth and count bounds, UTF-8 validity, and the atom-creation
-   policy, and it builds fresh `bees_term` values. On any failure it drops the input silently toward the peer and
-   writes an audit entry. It is a security boundary: fuzzed as one, with no other path in.
+   gate** (`bees_ingress`). The gate enforces size caps, depth and count bounds, UTF-8 validity, and the atom policy
+   (only atoms the atom lookup holds), and it builds fresh `bees_term` values. On any failure it drops the
+   input silently toward the peer and writes an audit entry. It is a security boundary: fuzzed as one, with no other
+   path in.
 8. **There is no package mechanism.** *Rule:* every BEES module basename starts with `bees_` (or `dangerous_bees_`).
    `bees_config` assembles the consumer's `silica.config` from BEES and the compilers' output, and generates the
-   program-wide module and atom tables. It retires with S-7.
+   program-wide module table and atom lookup. It retires with S-7.
 9. **There is no CI.** Silica's "CI" is a human-run `make integrate` of about an hour on Apple Silicon. *Rule:* BEES
    keeps its own trial tree in Silica's format, pins the compiler generation it was verified with, and re-runs the
    tree on every compiler bump.
@@ -228,10 +253,10 @@ compiler projects can start.
   | Spike | Question | Kills or reshapes |
   | --- | --- | --- |
   | **S1 Trait mapping** | Can generated code implement Silica's `Supervisor` trait with `bees_term` state and messages, specialized at compile time, across the >32-unit reclaim path? What must Silica's gen_server and state-machine traits look like to host OTP callback modules? | Contract item 5; the shape of S-17 and S-19. |
-  | **S2 Cross-unit atoms** | Does a Silica atom minted in one unit compare equal in another, as a message, a state field and a case pattern? | Everything. Failure means filing S-1 as a blocker. |
+  | **S2 Cross-unit atoms** | Does a Silica atom minted in one unit compare equal in another, as a message, a state field and a case pattern? Does a generated atom lookup, a `case` over atom literals from several units, return the right spelling for each? | Everything. Failure means filing S-1 as a blocker. |
   | **S3 Actor ceiling** | Maximum live actors, and RSS/VA per actor, on 16 GB and 64 GB Macs; the cost of a spawn and of one message. | PoC scale; the urgency of S-6. |
   | **S4 Native edge** | A `dangerous_bees_native` wrapper (`clock_gettime`, `poll`) called from a `spawn_dangerous` worker. What do the naming cascade and the W4001 warning look like in a consumer app? | Every E-class component. |
-  | **S5 Bytes** | How far can binaries and bit syntax get before S-4? | A1's binary scope before S-4. |
+  | **S5 Bytes without conversion** | Hand-lower bit-syntax matching and construction, a 64-bit float decode and encode, and `bxor` on `int64`, using only lookups and same-type arithmetic. How are `uint8` literals written and matched in a `case`? Does a 256-way `case` compile to a jump table or to a chain of comparisons? What does each lowering cost? | BEES's own codecs (ETF, framing); the guidance BEES gives compiler projects. |
   | **S6 Terms and heap** | `bees_term` as a recursive tagged tuple (`recursive_tuple_specification.md`) in a region held in actor state. Can a region be released today? What does an evacuation cost? | Contract items 1 and 6; the urgency of S-15. |
   | **S7 Death observation** | Can BEES observe the death of an actor it does not supervise without runtime `monitor`? Expected: no, which confirms S-2. | Whether A2 can start before S-2. |
   | **S8 Copy gate** | FFI bytes → `bees_ingress` → fresh terms → actor. Confirm the taint checker accepts the gated path, and pin the rejection of direct forwarding in a `.golden_fail` trial. | Every remote message path. |
@@ -254,8 +279,8 @@ are out of scope. The PoC runs the **reference lowerings**: Silica written by ha
 compiler would emit. If an external Erlang-to-Silica compiler exists by then, the PoC runs its output too.
 
 - **Track A slice: shim v0.**
-  - `bees_term` for `int64`, atoms, tuples, lists, pids (local `actor_ref`s), and binaries as opaque values;
-  - the shared atom table;
+  - `bees_term` for `int64`, atoms (Silica atoms), tuples, lists, pids (local `actor_ref`s), and binaries as opaque
+    values;
   - region evacuation at receive boundaries;
   - the receive helpers (save queue, `after` timer);
   - `bees_timer` over a native clock;
@@ -263,7 +288,7 @@ compiler would emit. If an external Erlang-to-Silica compiler exists by then, th
     an `io:format/2` subset;
   - a `supervisor` callback module as a Silica `Supervisor` trait implementation.
 - **Track T slice:** contract v0 exercised end to end by the reference lowerings, and `bees_config` generating the
-  program-wide module and atom tables.
+  program-wide module table and atom lookup.
 - **Track B slice.**
   - **TRUST:** lowered Erlang on node A calls `trpc:call(Host, Port, {M,F,A}, Args)`, the BEAM_SEMP API. Node B runs
     the allowlisted function through the module table, in a per-request worker. The call uses TLS 1.3 mTLS, the
@@ -283,18 +308,18 @@ compiler would emit. If an external Erlang-to-Silica compiler exists by then, th
 
 | ID | Milestone | Contents | Blocks on | Exit criteria |
 | --- | --- | --- | --- | --- |
-| **A1** | Terms and memory | All `bees_term` types; Erlang term order and both equalities; the atom table with its cap; maps in term order over `wbt_map`; the bit-syntax runtime; bignums; `term_to_binary`/`binary_to_term` (with `safe`); the evacuation API. | S-4, S-11, S-15 | Term-order and bit-syntax trials derived from OTP's `erts` test suites. A long-running process's memory stays flat under load. |
-| **A2** | Processes and signals | Runtime helpers for plain Silica actors: the save queue and `after` timers for reshaped `receive`; the process dictionary helpers; conversion between Silica's lifecycle events and Erlang terms (`'DOWN'`, `{'EXIT', Pid, Reason}`) on top of Silica's links, monitors and trap-exit (S-2, S-9); `exit/2`; `spawn`/`spawn_link`/`spawn_monitor`/`spawn_opt` BIFs over Silica spawn; registered names over the atom table; timers (`send_after`, `start_timer`, `cancel_timer`, `read_timer`); `process_info`, `processes/0`, `is_process_alive/1`. | S-2, S-9; S-3 (the native clock stands in) | Signal and receive trials derived from OTP's process and signal test suites, as reference lowerings. |
+| **A1** | Terms and memory | All `bees_term` types, with atoms as Silica atoms; Erlang term order and both equalities; the atom BIFs (`atom_to_list`, `list_to_existing_atom`, and `list_to_atom` per D16) as lookups in the atom lookup; maps in term order over `wbt_map`; binaries as `buf(uint8)` terms, and the binary BIFs; bignums; `term_to_binary`/`binary_to_term` (with `safe`) in Silica; the evacuation API. | S-1, S-11, S-15 | Term-order trials, and bit-syntax trials as reference lowerings, derived from OTP's `erts` test suites. A long-running process's memory stays flat under load. |
+| **A2** | Processes and signals | Runtime helpers for plain Silica actors: the save queue and `after` timers for reshaped `receive`; the process dictionary helpers; building Erlang terms (`'DOWN'`, `{'EXIT', Pid, Reason}`) from Silica's lifecycle events, on top of Silica's links, monitors and trap-exit (S-2, S-9); `exit/2`; `spawn`/`spawn_link`/`spawn_monitor`/`spawn_opt` BIFs over Silica spawn; registered names keyed by Silica atoms; timers (`send_after`, `start_timer`, `cancel_timer`, `read_timer`); `process_info`, `processes/0`, `is_process_alive/1`. | S-2, S-9; S-3 (the native clock stands in) | Signal and receive trials derived from OTP's process and signal test suites, as reference lowerings. |
 | **A3** | ERTS modules and BIFs | The `erlang` module's BIFs, in coverage tiers. `ets` (actor-owned tables over `wbt_map`, with documented concurrency differences). `persistent_term`, `atomics`, `counters`, `os`, `init` and the boot sequence, `code` over the program-wide module table. Handler back ends for compiled `logger`. `crypto` (hash, HMAC, `strong_rand_bytes`) over the native edge. | A1, A2; S-8 | Each BIF tier passes its trial subset. |
 | **A4** | OTP behaviours on Silica traits | The contract's mapping of `gen_server`, `gen_statem` and `supervisor` onto Silica's traits, with reference lowerings. `proc_lib` and `sys` runtime support. Each documented difference from OTP (`hibernate`, `code_change`, `sys` debug) goes in the README. | S-17, S-19, S-2 | OTP behaviour test cases (derived from the gen_server, gen_statem and supervisor suites) pass as reference lowerings, and every exclusion is justified. |
-| **A5** | Host I/O and observability | `bees_io`: one event loop per core (kqueue, epoll) in the native edge. `prim_inet` under compiled `gen_tcp`/`gen_udp`/`inet`, with `{active, once}` backpressure. `prim_file` under compiled `file`. Group leaders and the I/O protocol server. Telemetry. | S-8 | A lowered TCP echo server holds 1,000 concurrent connections; a slow reader pauses its socket. |
+| **A5** | Host I/O and observability | `bees_io`: one event loop per core, over Silica's own TCP/IP implementation (S-22), and over kqueue/epoll in the native edge until it lands. `prim_inet` under compiled `gen_tcp`/`gen_udp`/`inet`, with `{active, once}` backpressure. `prim_file` under compiled `file`. Group leaders and the I/O protocol server. Telemetry. | S-8; S-22 soft (native-edge sockets stand in) | A lowered TCP echo server holds 1,000 concurrent connections; a slow reader pauses its socket. |
 | **A6** | Scheduler | The BEES scheduler over the Silica scheduler interface:<br>• one carrier thread per core;<br>• per-core run queues and work stealing;<br>• a dispatch budget standing in for reductions, enforced at the compilers' yield points (contract item 6);<br>• process priorities;<br>• affinity, placement and migration (the placement hook);<br>• a separate pool for blocking and `spawn_dangerous` actors, including every native-edge worker;<br>• overload protection and a runaway-dispatch watchdog;<br>• scheduler statistics for `erlang:statistics/1` and `erlang:system_info/1`. | S-6 (scheduler interface), D15; A2 | Fairness trials: a CPU-bound process cannot starve its neighbours. Work stealing balances a skewed spawn. 100,000 live processes on a 16 GB Mac. |
 
 ### Track T — Target contract
 
 | ID | Milestone | Contents | Blocks on | Exit criteria |
 | --- | --- | --- | --- | --- |
-| **T1** | Contract 1.0 | All eight contract items specified completely. That includes cross-language rules: one atom table, one module table, and one exception representation for every language, so that Elixir-compiled code can call Erlang-compiled code. It also includes a versioning and deprecation policy. | A1, A2, A4 | Every construct in gap-ledger §1 whose class is C has a contract section and a reference lowering. |
+| **T1** | Contract 1.0 | All eight contract items specified completely. That includes cross-language rules: every language's atoms are Silica atoms, and there is one module table, one atom lookup and one exception representation for every language, so that Elixir-compiled code can call Erlang-compiled code. It also includes a versioning and deprecation policy. | A1, A2, A4 | Every construct in gap-ledger §1 whose class is C has a contract section and a reference lowering. |
 | **T2** | Conformance kit | The reference lowerings, plus a self-check suite that a compiler runs against BEES. The suite consists of source programs, expected output and contract assertions. It is packaged so that compiler projects can run it in their own CI. | T1 | The kit runs green on BEES's own reference lowerings. |
 
 ### Track B — Inter-nodal
@@ -369,6 +394,7 @@ depends on yet.
 | **D13** | NIFs. | **Open — under discussion.** Proposal: not in 1.0. After 1.0, `erlang:load_nif` binds statically linked Silica FFI wrappers. | — |
 | **D14** | Which OTP release's semantics the shim's BIFs follow. | **Open — under discussion.** Proposal: one named release for 1.0, chosen at Stage 0. | BIF semantics drift between OTP releases. |
 | **D15** | How the BEES scheduler drives plain Silica actors. | **Open.** Proposal: the Silica runtime keeps each actor's mailbox, links, monitors, supervision and crash containment. Through a scheduler interface (S-6) it reports "actor X became runnable" to BEES, and exposes "run one dispatch of actor X on this thread." BEES owns the carrier threads, the queues, work stealing, and budgets. | This follows from D1 and D3. Spike S11 prototypes it. |
+| **D16** | What happens to a spelling that is not in Silica's atom table. | **Open.** Proposal: `list_to_atom/1` and `binary_to_atom/2` behave as `list_to_existing_atom/1` and `binary_to_existing_atom/2`: a lookup that raises `badarg` when it finds no atom. On the wire, `bees_ingress` rejects a frame that carries such an atom ([inter-nodal-modes §1.2](inter-nodal-modes.md#12-the-copy-gate)). | Silica's atom table is fixed at compile time, and BEES has no atom table of its own (§4.6), so no atom can be created at run time. In BEAM mode node names travel as atoms, so this also decides what happens to a peer whose node name never appears in the program. |
 
 ## 7. Top risks
 
@@ -377,7 +403,8 @@ depends on yet.
 | No external compiler is ready when the shim is. | I3 and 1.0 slip, and the shim is validated only by hand-written lowerings. | Publish contract v0 at Stage 0; the conformance kit makes a compiler's first steps cheap; the reference lowerings keep BEES testable on its own. |
 | The contract underspecifies something two compilers then do differently. | Code compiled by different compilers cannot interoperate. | Cross-language rules in T1; the conformance kit includes cross-language programs; the contract is versioned. |
 | Region evacuation is too slow, or S-15 is late. | Long-lived processes cannot run. | Spike S6 first; push S-15 early; tune evacuation thresholds in A1. |
-| Track S items slip or are declined (especially S-1, S-2, S-4, S-6, S-11, S-15). | Stage 1, A1, A2, A6 and conformance stall. | File them early with failing trials, and offer to implement them. For S-6, spike S11 produces a working prototype of the interface to propose. |
+| Track S items slip or are declined (especially S-1, S-2, S-6, S-11, S-15). | Stage 1, A1, A2, A6 and conformance stall. | File them early with failing trials, and offer to implement them. For S-6, spike S11 produces a working prototype of the interface to propose. |
+| Byte handling through lookups is too slow (a 256-way `case` per byte; float encode and decode). | Binary-heavy code and ETF run slowly. | Spike S5 measures before A1; each compiler chooses its own lowering; BEES tunes its own codecs. |
 | The Silica scheduler interface (S-6) turns out too narrow for a BEAM-grade scheduler. | A6 cannot deliver fairness or scale. | Spike S11 measures before A6 starts. The requirements come from A6's exit criteria, not from Silica's current runtime. |
 | A defect in `bees_ingress`. | Remote input reaches processes unvalidated. | One gate, no bypass, kept small, fuzzed per validator, inside the external review. |
 | Silent miscompilation in the Silica compiler, amplified by the volume of generated code. | Wrong answers even with green trials. | Differential testing against a reference BEAM; minimize any reproducer to a Silica trial immediately; pin compiler generations. |
