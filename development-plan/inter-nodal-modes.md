@@ -442,7 +442,7 @@ Exit signals crossing a node boundary follow D18.
   | Atoms | The Silica atom that the atom lookup holds for that spelling; a spelling the lookup does not hold is rejected (§1.2) |
   | Binaries, bitstrings | Binaries and bitstrings |
   | Tuples, lists, maps | The corresponding terms |
-  | Pids | The node plus the pid's supervision-tree address (D22). Pids from Erlang nodes keep their own id, serial and creation. A BEES address is a fixed 64-bit value (D22), so it goes on the wire directly: the high 32 bits as `NEW_PID_EXT`'s id and the low 32 bits as its serial. |
+  | Pids | The node plus the pid's 64-bit identity (D22). Pids from Erlang nodes keep their own id, serial and creation. A BEES identity is a fixed 64-bit value (D22), so it goes on the wire directly: the high 32 bits as `NEW_PID_EXT`'s id and the low 32 bits as its serial. |
   | References, ports | Remote references and ports, carrying their node |
   | Export funs (`fun M:F/A`) | Fun terms that run through the module table |
   | Local funs | Opaque terms; calling one raises `badfun` (gap ledger §5) |
