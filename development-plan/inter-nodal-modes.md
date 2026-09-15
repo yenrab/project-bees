@@ -12,18 +12,14 @@ BEAM-language programs compiled to Silica through BEES reach other nodes in one 
 | Connection model | Short-lived: one request (B1), or a bounded session window (B2) | Long-lived, full mesh, with net ticks |
 | What a peer may do | Call or cast MFAs that the whitelist allows for its fingerprint and that the forbidden guard does not block. Nothing else. | What an OTP peer may do (send, link, exit), with remote spawn off unless enabled (§4.5) |
 | Failure reporting to the peer | None; failures are logged locally and scored as suspicion | As in OTP: exit reasons, `noconnection` |
-| Remote pids and links | No (roadmap decision D9) | Yes |
+| Remote pids and links | No; not for 1.0 (roadmap decision D9) | Yes |
 
 Both modes are part of Track B ([parallel-tracks.md](parallel-tracks.md)). They are milestones B1 and B2 (TRUST) and
 B3 and B4 (BEAM mode) in the [roadmap](roadmap.md). SEMP/TRUST has no implementation today: the Erlang code in
 `BEAM_SEMP` is the **design starting point**, and BEES is the implementation. Where that code disagrees with its own
 documentation, this document follows the documentation. §3.12 lists every such discrepancy.
 
-> **Open decisions.** Where this document cites decisions D6–D11 and D16 (the TLS engine, how the two modes coexist,
-> the TRUST payload, `trust/2`, quarantine recovery, the whitelist key, and atoms not in Silica's atom table), it
-> describes the current *proposal*. Those
-> decisions are open and under discussion ([roadmap §6](roadmap.md#6-decisions)), and this document changes when
-> they are decided.
+> **Decisions.** Every decision this document cites has been made ([roadmap §6](roadmap.md#6-decisions)).
 
 Both modes are implemented in Silica as parts of the BEES shim. Compiled BEAM code reaches them through the usual
 module names (`trpc`, and `erlang`'s distribution BIFs underneath OTP's compiled `net_kernel`, `erpc`, `global` and
@@ -41,9 +37,10 @@ graph TD
   end
   TRPC --> TR[bees_trust]
   DBIF --> DI[bees_dist]
-  TR --> CODEC[bees_etf encoder]
-  DI --> CODEC
-  CODEC --> IO[bees_io ports<br/>over Silica TCP/IP]
+  TR --> TCODEC[trust/1 codec]
+  DI --> CODEC[bees_etf codec]
+  TCODEC --> IO[bees_io ports<br/>over Silica TCP/IP]
+  CODEC --> IO
   IO <--> EDGE[(native edge:<br/>TLS, random bytes)]
   EDGE -->|FFI-derived data| RC[re-creation<br/>S-5]
   RC -->|pure, re-created bytes| GATE[bees_ingress]
@@ -100,7 +97,7 @@ validation that the compiler cannot do:
    table of its own, so the gate never creates an atom. In both modes it looks each spelling up in the program's
    atom lookup (roadmap §4.6), accepts only atoms found there, and rejects a frame carrying any other atom under
    item 6 (D16).
-   - In TRUST this is the `binary_to_term(Bin, [safe])` rule the reference uses (D8).
+   - In TRUST, atoms travel as spellings in the `trust/1` encoding (D8), and only spellings the atom lookup holds are accepted.
    - In BEAM mode it is a difference from OTP, which creates new atoms. An OTP peer that sends an atom the program's
      compiled code never mentions has its frame rejected.
    - Because every pid carries its node's name as an atom, **every node allowed to connect in BEAM mode must be
@@ -199,7 +196,6 @@ replaced by Silica TLS intrinsics (S-13) without a wire change.
 - No 0-RTT, no renegotiation, no compression.
 - The client CA must be configured explicitly; there is no implicit system trust store.
 
-Which OTP releases support X25519MLKEM768 for Erlang SEMP clients is checked in the B1 interop tests.
 
 ### 3.3 Identity and whitelists
 
@@ -244,8 +240,9 @@ fingerprint, and still no 0-RTT.
 
 ### 3.6 The `trust/1` wire protocol
 
-Each frame is a 4-byte big-endian length followed by an ETF payload, decoded under D8 (existing atoms only, no pids,
-references, ports or funs). Every payload is a map with a `t` key. The top-level keys `t` and `ver` (currently `1`)
+Each frame is a 4-byte big-endian length followed by a payload in the **`trust/1` term encoding** (D8). That is a
+compact format made for TRUST, not ETF. It carries integers, floats, binaries, atoms by spelling (existing atoms only,
+D16), lists, tuples and maps, and nothing else: no pids, references, ports or funs. B1 defines its exact bytes. Every payload is a map with a `t` key. The top-level keys `t` and `ver` (currently `1`)
 are required. Unknown top-level keys are ignored. An unknown `t` is a protocol error.
 
 | `t` | Direction | Fields | Notes |
@@ -381,22 +378,17 @@ are defects. BEES implements what the documentation intends.
 
    BEES uses the values in §3.8 and reads everything from the `trust` application.
 6. **Recovery from quarantine is contradictory.** The README says both "self-healing" and "out-of-system reset."
-   D10 (under discussion) proposes an operator reset only.
-7. **The whitelist key is described two ways** (TBSCertificate versus full DER). D11 (under discussion) proposes the full DER.
+   D10 settles it: an operator reset only.
+7. **The whitelist key is described two ways** (TBSCertificate versus full DER). D11 settles it: the full DER.
 8. **Standard distribution is disabled by tracing.** `semp_kill_it_all` stops standard distribution by tracing `rpc`
    and `erpc` and killing the callers. BEES never starts BEAM mode unless it is configured (§2).
 
-### 3.13 Interoperability with Erlang SEMP nodes
+### 3.13 Clients
 
-The `trust/1` wire stays readable by Erlang: ETF maps with a length prefix. For an Erlang SEMP node to interoperate
-with BEES, it needs three changes:
-
-- the `hello` frame;
-- no error frames;
-- the TLS profile in §3.2.
-
-A language-neutral `trust/1` specification is a B1 deliverable, written so that the Swift client mentioned in the
-SEMP README can be built from it.
+There will be no Erlang clients (D8), so `trust/1` makes no attempt to stay readable by Erlang SEMP nodes, and BEES
+does not reproduce the reference implementation's wire. A language-neutral `trust/1` specification, covering the
+frames, the term encoding and the TLS profile in §3.2, is a B1 deliverable. Any client, in any language, can then be
+built from it.
 
 ---
 
@@ -493,8 +485,15 @@ requires.
 
 ## 5. TEMPUS (post-1.0)
 
-TEMPUS is SEMP's layer for ephemeral peers. Its design is in the `BEAM_SEMP` README. When work begins, BEES maps it as
-follows:
+TEMPUS is SEMP's layer for ephemeral peers. Its design is in the `BEAM_SEMP` README. **TRUST is built first, and
+TEMPUS is added afterwards as a layer on top of it** (D12). TEMPUS reuses TRUST's TLS transport, framing, term
+encoding and `bees_ingress` path, and adds membership and admission for peers that come and go.
+
+One design point to settle when TEMPUS work starts: ephemeral peers can't be listed in TRUST's certificate whitelist
+in advance. So for TEMPUS traffic, admission through producer tokens and proof of possession has to stand in for
+the whitelist lookup, while TRUST's other rules stay in force.
+
+When work begins, BEES maps TEMPUS as follows:
 
 - **Three isolated Cyclon stores** (`tempus_edge`, `tempus_bridge`, `tempus_sentinel`). Each is a process on Silica's
   gen_server trait, holding its view in a term map keyed by peer ID, with a shuffle tick from `bees_timer`. Stores

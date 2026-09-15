@@ -33,8 +33,7 @@ the [roadmap](roadmap.md)'s definition of 1.0, and the seed of the target contra
 - **—**: a Silica construct used as-is.
 
 Spec section numbers refer to `silica/compiler/silica-compiler/design_documents/silica-specification.md`. Decisions
-D2 and D6–D16 are still open ([roadmap §6](roadmap.md#6-decisions)). Where a row cites one of
-them, it describes the current proposal.
+Every decision it cites has been made ([roadmap §6](roadmap.md#6-decisions)).
 
 ---
 
@@ -159,7 +158,7 @@ them, it describes the current proposal.
 | --- | --- | --- | --- | --- | --- |
 | Ahead-of-time compilation | Language compiler → Silica compiler → native executable | — | C | I3 | 1.0 |
 | Hot code loading, two versions of a module | Silica dynamic linking and `hot_swap` | Spec bullets only (§26.3.2); roadmap chunk 8 | U (S-12), B | Post-1.0 | Post |
-| NIFs | Silica FFI wrappers, linked statically | Fifi tested | — (the `dangerous_` naming rule applies) | Post-1.0 (D13) | Post |
+| NIFs | **Reworked by the language compiler** into a Silica actor that wraps the external call through Fifi: a `dangerous_*` module and a `spawn_dangerous` worker, as standard Silica does (D13). `erlang:load_nif` is not provided. | Fifi tested | C; U (S-5) for results used beyond the receiving handler; U (S-24) on the raw targets | T1 | 1.0 |
 
 ---
 
@@ -170,14 +169,14 @@ them, it describes the current proposal.
 | Target contract and conformance kit | B | R0.3, T1, T2 | The specification that all language compilers share, plus reference lowerings and a self-check suite. |
 | `bees_config` | B (tooling) | R0.1, T1 | Assembles `silica.config`; generates the program-wide module table and atom lookup from compiler manifests. |
 | `bees_term`, `bees_cmp`, `bees_map`, `bees_bits`, `bees_heap` | B | Stage 1, A1 | The term model (atoms are Silica atoms), term order, maps, bit syntax, and the evacuation API. |
-| `bees_etf` | B, E | A1, B3 | `term_to_binary`/`binary_to_term`, and the wire codec. |
+| `bees_etf` | B, E | A1, B3 | `term_to_binary`/`binary_to_term`, and the BEAM-mode wire codec. TRUST has its own encoding (D8). |
 | `bees_recv` (save queue, `after` timers), `bees_pdict`, `bees_signal`, `bees_names`, `bees_timer`, `bees_exit_hub` (per core) | B | Stage 1, A2 | Runtime helpers that reshaped code calls, and the exit hub that receives supervisor exit reports (D23). None of them wraps an actor. |
 | `bees_bif_*`, `bees_table`, `bees_pterm`, `bees_atomics`, `bees_os`, `bees_init`, `bees_code`, `bees_crypto` | B, E | A3 | The ERTS-level modules. |
 | Behaviour adapters: Silica's `Supervisor` trait, the call/cast gen_server split, and the state-machine trait | B | A4 | The runtime side of contract item 5. |
 | `bees_io`, `bees_prim_inet`, `bees_prim_file`, `bees_stdio`, `bees_telemetry` | B, E | A5 | Host I/O and observability. |
 | `bees_place` (balancer, placement hook, reserved cores for blocking and dangerous actors, dispatch-budget helper, watchdog, load statistics) | B | A6 | Balancing and placement across cores through `migrate_actor()` (D3). |
 | `bees_ingress` | B | Stage 1, B1 | Protocol validation for all network input: TLS plaintext after re-creation, and bytes from Silica's own sockets. |
-| `bees_trust` (listener, connection FSM, client, whitelist, tokens, suspicion), exposed as `trpc` | B, E | Stage 1, B1, B2 | See inter-nodal-modes.md §3. |
+| `bees_trust` (listener, connection FSM, client, whitelist, tokens, suspicion, the `trust/1` term codec), exposed as `trpc` | B, E | Stage 1, B1, B2 | See inter-nodal-modes.md §3. |
 | `bees_dist` (EPMD, handshake, control messages, node connections, distribution BIFs) | B, E | Stage 1, B3, B4 | See inter-nodal-modes.md §4. |
 
 ---
@@ -236,7 +235,7 @@ records.
 | TCP and UDP socket calls; kqueue/epoll registration and wait | `bees_io`, `prim_inet` | Silica's own TCP/IP implementation (S-22) |
 | `getaddrinfo` (A/AAAA records only) | DNS | Silica's `resolve_hostname` (S-22) |
 | File write, directory operations, file metadata | `prim_file` | Silica `device_io` completion |
-| TLS 1.3 session operations: configure, handshake, read, write, peer certificate DER and its SHA-512, ALPN | TRUST, BEAM-mode TLS | A Silica TLS built-in (S-13; not planned at first, D17) |
+| TLS 1.3 session operations through rustls (D6), with no sockets of its own: configure, handshake, read, write, peer certificate DER and its SHA-512, ALPN | TRUST, BEAM-mode TLS | A Silica TLS built-in (S-13; not planned at first, D17) |
 | SHA-2 family, MD5, HMAC | `crypto`, certificate fingerprints, the Erlang cookie challenge | S-14 (MD5 stays for as long as BEAM mode exists) |
 | `random_bytes(n)` | `crypto:strong_rand_bytes`, tokens, challenges | A Silica secure-random built-in (not planned at first, D17) |
 | `ct_equal(a, b)` | Token validation | S-14 |
@@ -267,7 +266,7 @@ and BEES do provide.
 | Creating atoms at run time | Not provided. `list_to_atom` and `binary_to_atom` return only atoms the atom lookup holds (D16); the wire accepts only those atoms too. | Decided in D16, for security. Atoms are Silica atoms. Silica's atom table is fixed at compile time, and BEES has no atom table of its own. In BEAM mode, the same rule makes the set of peers that may connect fixed at build time: a node must be named in the code. |
 | Calling a local fun received from an Erlang node in BEAM mode | Not provided. The fun is carried as an opaque term, and calling it raises `badfun`. | Its code is BEAM bytecode. Export funs (`fun M:F/A`) work through the module table. |
 | Hot code loading | Post-1.0 (S-12) | Needs Silica dynamic linking. |
-| NIFs | Post-1.0 (D13) | They are written against the BEAM's C API. |
+| NIFs loaded at run time (`erlang:load_nif`) | Not provided (D13) | Each compiler reworks a NIF into a Silica actor that wraps the external call. |
 | ETS concurrency guarantees | The options are accepted, and the actual semantics are documented | Silica actors share no mutable memory, so every table access is serialized through the table's owner. |
 | Emulator introspection (`erts_debug`, scheduler `system_flag`s, GC statistics) | Accepted as no-ops or mapped (`garbage_collect` triggers an evacuation), and documented | These describe emulator internals that do not exist here. |
 | Bug-for-bug OTP compatibility | Not claimed | As the README states; semantics follow one named OTP release (D14). |
