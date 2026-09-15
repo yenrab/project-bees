@@ -26,16 +26,16 @@ The two tracks share a common vocabulary (actors, messages, links, supervision) 
 
 **Scope:** the runtime shim that compiled BEAM-language code needs on a single host.
 
-This track is concerned with how BEAM processes, which are Silica actors, are *created*, *scheduled*, *balanced*, *preempted*, *linked*, *supervised*, and *torn down* on one machine, and with the BEAM-specific runtime semantics that compiled code relies on. Its success criterion is that a program written in a BEAM language, compiled to Silica, runs correctly and efficiently on a single node, using all available cores, with the scheduling and lifecycle behavior BEAM programmers expect.
+This track is concerned with how BEAM processes, which are Silica actors, are *created*, *scheduled*, *balanced*, *preempted*, *linked*, *supervised*, and *torn down* on one machine, and with the BEAM-specific runtime semantics that compiled code relies on. Its success criterion is that a program written in a BEAM language can be compiled to Silica and run correctly and efficiently on a single node, using all available cores. BEES makes that possible, not easy: it does not duplicate every BEAM behaviour. Where Silica behaves differently, the target contract documents it and the language compiler adapts.
 
 ### Concerns owned by this track
 
 - **Terms & memory** — the universal term type compiled code manipulates, Erlang term order, maps, binaries and bit syntax, and reclaiming process memory without a garbage collector. Atoms are not a BEES concern: a BEAM atom is a Silica atom, held in Silica's atom table.
 - **BIFs & ERTS-level modules** — `erlang`, `ets`, `persistent_term`, `os`, `code`, `crypto`, and the other modules the BEAM implements natively rather than in Erlang.
-- **OTP behaviours on Silica constructs** — mapping `gen_server`, `gen_statem`, and `supervisor` modules onto Silica's gen_server, state-machine, and `Supervisor` traits.
-- **Schedulers** — run queues, work-stealing, fairness, preemption points, reduction-style budgeting (or the Silica-appropriate analogue). The scheduler lives in BEES. On OS-hosted apps it runs plain Silica actors through a scheduler interface that the Silica runtime provides.
-- **Multi-core balancing** — distribution of actors across cores, affinitization, locality, migration *between cores on the same node*. On OS-hosted apps the kernel owns the cores, so BEES balances BEAM-style between its carrier threads and a pin is at most a preference. Running raw on a chip, no OS shares the cores, so a pin is exclusive and BEES balances BEAM-style-ish directly onto the cores, using Silica's `migrate_actor()`, with each migration taking effect at a yield point.
-- **Actor lifecycle** — spawn, exit, normal/abnormal termination, links, monitors, trapping, mailbox semantics.
+- **OTP behaviours on Silica constructs** — mapping `gen_server`, `gen_statem`, and `supervisor` modules onto Silica's gen_server-style behaviours, state-machine trait, and `Supervisor` trait. A `gen_server` that handles both calls and casts becomes two Silica gen_server-style actors, one call-only and one cast-only.
+- **Scheduling, balancing & placement** — Silica's runtime schedules each core: run queues, fairness, preemption, priority. BEES owns balancing and placement across cores, BEAM-style, through Silica's `migrate_actor()`. It also owns the dispatch budget that compiled code checks at its yield points, which is the Silica-appropriate analogue of reductions.
+- **Multi-core balancing** — distribution of actors across cores, affinitization, locality, migration *between cores on the same node*. On OS-hosted apps the kernel owns the cores, so BEES balances BEAM-style between the Silica runtime's carrier threads with `migrate_actor()`. An actor's binding to its carrier thread is hard, but the OS may move the carrier thread, so exclusive placement is never guaranteed. Running raw on a chip, no OS shares the cores, so a pin is exclusive and BEES balances BEAM-style-ish directly onto the cores, using Silica's `migrate_actor()`, with each migration taking effect at a dispatch boundary or yield point.
+- **Actor lifecycle** — spawn, exit, normal/abnormal termination, links, mailbox semantics, as Silica provides them. Every actor has a supervisor, and `exit/2` goes to the target's supervisor. BEES provides neither `trap_exit` nor monitors.
 - **Supervision integration** — how BEES surfaces interact with Silica's native supervisors and actors.
 - **Mailboxes & message delivery (intra-node)** — ordering guarantees, selective receive semantics, back-pressure for in-process sends.
 - **I/O integration on the host** — how actors interact with the host's I/O without breaking scheduling assumptions.
@@ -64,7 +64,7 @@ This track is concerned with how nodes find each other, how actors are *named* a
 - **Cross-node addressing** — referring to an actor that lives on another node; stability of those references across migration.
 - **Transport** — protocols and adapters for moving messages between nodes; framing, ordering, and back-pressure across the wire.
 - **Placement & migration (inter-node)** — policies and mechanisms for deciding *which* node an actor should run on, and for moving it.
-- **Partition & failure semantics** — what happens to references, links, and monitors when a peer becomes unreachable.
+- **Partition & failure semantics** — what happens to references and links when a peer becomes unreachable.
 - **Security & trust at the boundary** — authentication, authorization, and confidentiality between nodes, **secure by default** (see *Security posture* below).
 - **Observability across nodes** — cluster-level tracing, distributed metrics, debugging conversations that cross hosts.
 
@@ -116,9 +116,9 @@ The goal is parity *as a ceiling*, not as a baseline: BEES users should be able 
 
 Although the two tracks proceed in parallel, they are not unrelated. They meet at a small, deliberate set of contracts:
 
-- **Actor identity** — a representation of "who" an actor is that is meaningful both locally (Track A) and across the network (Track B).
+- **Actor identity** — a representation of "who" an actor is that is meaningful both locally (Track A) and across the network (Track B). It is the actor's address in the supervision tree; across the network, the node is added.
 - **Message envelope** — a shape for a delivered message that does not change depending on whether the sender was local or remote.
-- **Lifecycle events** — spawn, exit, link-broken, monitor-fired — surfaced uniformly so that distribution can react to them without reaching into scheduler internals.
+- **Lifecycle events** — spawn, exit, link-broken — surfaced uniformly so that distribution can react to them without reaching into scheduler internals.
 - **Placement hooks** — the point at which "run this actor *somewhere*" is resolved; Track A answers "which core," Track B answers "which node," and the hook itself is shared.
 
 These contracts are the **integration surface** between the tracks. Changes to them are coordinated; changes *behind* them are each track's own business.
@@ -134,7 +134,7 @@ is also how code compiled from different languages interoperates within one prog
 
 Some things that compiled BEAM code needs belong in **Silica itself** rather than in a library:
 
-- constructs Silica's spec promises but its runtime does not yet deliver (links, monitors, lightweight actors on carrier threads, byte buffers across the FFI boundary);
+- constructs Silica's spec promises but its runtime does not yet deliver (links, lightweight actors on carrier threads, byte buffers across the FFI boundary);
 - constructs that belong beside what Silica already has (gen_server and state machines, beside the `Supervisor` trait; Silica's own TCP/IP implementation);
 - language primitives (big integers, region release).
 
@@ -150,7 +150,7 @@ The [roadmap](roadmap.md) tracks these as **Track S**, carried out in the Silica
 |                                  | Track A — On-Node                                                   | Track B — Inter-Nodal                                                  |
 | -------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | **Domain**                       | One machine                                                         | Between machines                                                       |
-| **Primary concerns**             | Terms and memory, processes and lifecycle, BIFs, OTP behaviours on Silica traits, scheduling policy | Node identity, transport, cross-node addressing, placement, partitions |
+| **Primary concerns**             | Terms and memory, processes and lifecycle, BIFs, OTP behaviours on Silica constructs, balancing and placement | Node identity, transport, cross-node addressing, placement, partitions |
 | **Depends on the other?**        | No                                                                  | No                                                                     |
 | **Can ship useful value alone?** | Yes (compiled BEAM-language programs on one node)                   | Yes (against any conforming on-node surface)                           |
 | **Meets the other at**           | Actor identity, message envelope, lifecycle events, placement hooks | Same                                                                   |

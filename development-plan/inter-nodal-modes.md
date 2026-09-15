@@ -5,14 +5,14 @@ BEAM-language programs compiled to Silica through BEES reach other nodes in one 
 | | **SEMP/TRUST** (default) | **Standard BEAM distribution** (explicit downgrade) |
 | --- | --- | --- |
 | Purpose | Secure-by-default service-to-service RPC between nodes | Interoperability with existing Erlang/OTP clusters, and BEAM-equivalent behaviour on trusted networks |
-| Programming interface for compiled code | `trpc:call/4,5`, `trpc:cast/4,5`: the BEAM_SEMP API | The standard one: `!` to remote pids and `{Name, Node}`, links, monitors, `spawn/4`, `erpc`, `rpc`, `global`, `pg` |
+| Programming interface for compiled code | `trpc:call/4,5`, `trpc:cast/4,5`: the BEAM_SEMP API | The standard one: `!` to remote pids and `{Name, Node}`, links, `spawn/4`, `erpc`, `rpc`, `global`, `pg` |
 | Transport | TLS 1.3 only, mTLS required, ALPN `trust/1` | TCP, optionally TLS compatible with `inet_tls_dist` |
 | Peer identity | SHA-512 fingerprint of the peer certificate | `name@host` plus creation, and a shared cookie |
 | Discovery | Explicit `host:port`; DNS A/AAAA only; no EPMD | EPMD (port 4369) |
 | Connection model | Short-lived: one request (B1), or a bounded session window (B2) | Long-lived, full mesh, with net ticks |
-| What a peer may do | Call or cast MFAs that the whitelist allows for its fingerprint and that the forbidden guard does not block. Nothing else. | What an OTP peer may do (send, link, monitor, exit), with remote spawn off unless enabled (§4.5) |
+| What a peer may do | Call or cast MFAs that the whitelist allows for its fingerprint and that the forbidden guard does not block. Nothing else. | What an OTP peer may do (send, link, exit), with remote spawn off unless enabled (§4.5) |
 | Failure reporting to the peer | None; failures are logged locally and scored as suspicion | As in OTP: exit reasons, `noconnection` |
-| Remote pids, links, monitors | No (roadmap decision D9) | Yes |
+| Remote pids and links | No (roadmap decision D9) | Yes |
 
 Both modes are part of Track B ([parallel-tracks.md](parallel-tracks.md)). They are milestones B1 and B2 (TRUST) and
 B3 and B4 (BEAM mode) in the [roadmap](roadmap.md). SEMP/TRUST has no implementation today: the Erlang code in
@@ -37,15 +37,17 @@ module names (`trpc`, and `erlang`'s distribution BIFs underneath OTP's compiled
 graph TD
   subgraph "Compiled BEAM-language code"
     APP[processes] -->|trpc:call/cast| TRPC[trpc API]
-    APP -->|"! / link / monitor / erpc"| DBIF[distribution BIFs]
+    APP -->|"! / link / erpc"| DBIF[distribution BIFs]
   end
   TRPC --> TR[bees_trust]
   DBIF --> DI[bees_dist]
   TR --> CODEC[bees_etf encoder]
   DI --> CODEC
-  CODEC --> IO[bees_io ports]
-  IO --> EDGE[(native edge:<br/>sockets until S-22, TLS, hashes)]
-  EDGE -->|FFI-derived bytes| GATE[bees_ingress copy gate]
+  CODEC --> IO[bees_io ports<br/>over Silica TCP/IP]
+  IO <--> EDGE[(native edge:<br/>TLS, random bytes)]
+  EDGE -->|FFI-derived data| RC[re-creation<br/>S-5]
+  RC -->|pure, re-created bytes| GATE[bees_ingress]
+  IO -->|cleartext bytes| GATE
   GATE -->|fresh, validated bees_term| TR
   GATE --> DI
   TR -->|allowlisted MFA via module table| W[per-request worker]
@@ -72,13 +74,23 @@ therefore depends on the mode:
   Remote spawn (SPAWN_REQUEST, which is what `erpc` and `rpc` use) is governed by the scoped `spawn` option in §4.5,
   and is off by default.
 
-### 1.2 The copy gate
+### 1.2 Re-creation and the ingress gate
 
-Until Silica's own TCP/IP implementation lands (S-22), every byte from the network arrives through the native edge.
-FFI-derived data may be copied and the copy sent, but it must never be sent directly. `bees_ingress` is the only
-place where that copy happens. Once Silica's TCP/IP carries the traffic, cleartext bytes are no longer FFI-derived,
-but they still reach actors only through `bees_ingress`, which stays the single path for remote input. The gate
-carries the safeguards:
+BEES keeps Silica's FFI spec as written.
+- FFI-derived data stays tainted however it is copied (FFI spec §7.4).
+- It cannot be sent on a socket (§7.3).
+- It must be consumed or discarded in the handler that receives it (§7.6).
+
+TLS and secure random bytes come through the native edge (D17), so remote input takes one of two paths:
+
+- **FFI-derived data** (TLS plaintext, random bytes, digests, peer-certificate data) is first **re-created** (S-5).
+  - The compiler-derived `recreate` checks the declared limits, rebuilds the value in a fresh region, and rejects
+    anything that does not fit its type.
+  - Only the re-created value leaves the handler. TLS ciphertext bound for a socket is re-created the same way.
+- **Cleartext bytes from Silica's own sockets** are untainted but untrusted.
+
+Both then pass **`bees_ingress`**, the single path for remote input into processes. It does the protocol-level
+validation that the compiler cannot do:
 
 1. **Frame bounds come first.** Reject any length prefix above `frame_size_max`, and any argument payload above
    `args_len_max`, before decoding anything.
@@ -91,11 +103,13 @@ carries the safeguards:
    - In TRUST this is the `binary_to_term(Bin, [safe])` rule the reference uses (D8).
    - In BEAM mode it is a difference from OTP, which creates new atoms. An OTP peer that sends an atom the program's
      compiled code never mentions has its frame rejected.
+   - Because every pid carries its node's name as an atom, **every node allowed to connect in BEAM mode must be
+     named in the code** (D16). The handshake enforces this (§4.3).
 4. **Type policy.**
    - TRUST accepts no pids, references, ports or funs.
    - BEAM mode accepts all of them. Local funs remain opaque, because their code is BEAM bytecode (gap ledger §5).
 5. **Fresh construction.** The output `bees_term` is built from new Silica values in the gate's own short-lived
-   worker, so no native-edge bytes survive into the copy.
+   worker.
 6. **Silent failure toward the peer.** Any violation drops the frame and closes the connection according to the
    mode's rules, and writes an audit entry. In TRUST it also applies a suspicion increment.
 
@@ -189,7 +203,7 @@ Which OTP releases support X25519MLKEM768 for Erlang SEMP clients is checked in 
 
 ### 3.3 Identity and whitelists
 
-- **Fingerprint**: FP = SHA-512 of the peer certificate's full DER (D11), computed in the native edge.
+- **Fingerprint**: FP = SHA-512 of the peer certificate's full DER (D11), computed in the native edge and re-created (S-5).
 - **Server-side whitelist** (`whitelist_file`): certificate file → permission spec, exactly as the reference
   implementation reads it. Each certificate is loaded and fingerprinted at boot. A missing file is logged and
   skipped. The permission specs are:
@@ -205,18 +219,18 @@ Which OTP releases support X25519MLKEM768 for Erlang SEMP clients is checked in 
 
 | Step | Reference implementation | BEES |
 | --- | --- | --- |
-| Argument count | `length(Args) =:= A` | Same, checked in the copy gate before any other step |
+| Argument count | `length(Args) =:= A` | Same, checked in `bees_ingress` before any other step |
 | Forbidden guard | `semp_policy` default map plus internal prefixes | The same map, extended with BEES's internal modules (§1.1) |
 | Permission gate | Whitelist spec for the fingerprint | Same |
 | Execution | `apply(M, F, Args)` in the connection process | The module-table call, in a **per-request worker process**. That satisfies roadmap §4.2 (the garbage dies with the worker) and matches the multiplexing design's worker-per-request shape. |
-| User code raises an exception | An error frame is sent (a defect) | The worker's exception is logged as `user_code_error` and counted as suspicion. **No** frame is sent (§3.12 item 1). |
+| User code raises an exception | An error frame is sent (a defect) | The worker fails (D2), and its supervisor reports the exit (D23). The connection FSM logs `user_code_error` and counts it as suspicion. **No** frame is sent (§3.12 item 1). |
 
 ### 3.5 Tokens
 
-- 48 random bytes by default (configurable from 32 to 64), from the native CSPRNG, stored **per peer fingerprint** with
+- 48 random bytes by default (configurable from 32 to 64), from the native edge's secure random source and re-created (S-5), stored **per peer fingerprint** with
   an expiry. There is one token per fingerprint; a new one overwrites the old.
 - Held in memory only, so a server restart invalidates every token. This is intended.
-- Compared in constant time, in the native edge until S-14.
+- Compared in constant time in the native edge until S-14. The result only decides accept or reject inside the handler, so it needs no re-creation.
 - Revoked on quarantine.
 - The client caches tokens per **server** fingerprint and presents one only to that server.
 - The default TTL is unified to **300 s** (§3.12 item 5).
@@ -294,7 +308,7 @@ newer and more conservative. All values are validated at boot.
 | `call_timeout_ms` | 5000 | 1–600,000 |
 | `frame_size_max` | 1 MiB | 64 KiB–8 MiB |
 | `args_len_max` | 64 KiB | 0–`frame_size_max` |
-| Term nesting depth | 32 | 1–128 (new: a copy-gate limit) |
+| Term nesting depth | 32 | 1–128 (new: a `bees_ingress` limit) |
 | Token size, TTL | 48 B, 300 s | 32–64 B, 10–3600 s |
 | Session: `max_inflight`, `max_age_ms`, `idle_ms`, `max_calls`, `drain_ms` | 8, 60,000, 5,000, 100, 1,000 | As in the multiplexing design doc; `idle_ms ≤ max_age_ms`; effective drain = `min(drain_ms, idle_ms)` |
 
@@ -328,7 +342,7 @@ The multiplexing design document maps onto BEES components as follows:
 | `trust_conn_sup` (DynamicSupervisor) | Silica `Supervisor`, `:one_for_one`, with dynamic children through `call_supervisor` `:add_child` |
 | `trust_conn_fsm` (gen_statem) | Silica's state-machine trait (S-17), §3.6 |
 | `trust_conn_worker_sup`, temporary `trust_rpc_worker` | A per-connection Silica `Supervisor` with `restart: :temporary` children, one per request |
-| Worker `'DOWN'` → `inflight--` | Silica `monitor` (S-2) |
+| Worker `'DOWN'` → `inflight--` | No monitors (D20). A worker casts its completion to the connection FSM, and a worker that crashed shows up in the per-connection supervisor's `count_children`. |
 | Pause reads when `inflight == max_inflight` | Leave the `bees_io` port un-armed (`{active, once}` not re-armed): Option A, no user-space queue |
 | `state_timeout` for idle; `send_after` for maximum age | State-machine timeouts; `bees_timer` |
 | Cancel by close (`kill_workers`) | Client close → terminate the per-connection supervisor with reason `client_cancel`; no suspicion increment |
@@ -399,16 +413,26 @@ posture when an operator deliberately wants it. It is a **downgrade**, as parall
 | Level | Capability | Milestone |
 | --- | --- | --- |
 | **L1 Messaging** | EPMD registration and lookup; the handshake; ticks; sending to remote pids and to `{Name, Node}`, in both directions | Stage 1 (partial), B3 |
-| **L2 Lifecycle** | LINK, UNLINK_ID and its acknowledgement, EXIT, EXIT2, MONITOR_P, DEMONITOR_P and MONITOR_P_EXIT. `monitor_node/2` and `nodedown`. `noconnection` delivered to every link and monitor that crosses a lost connection. | B3, I1 |
-| **L3 Remote execution** | SPAWN_REQUEST and SPAWN_REPLY, so compiled `erpc` and `rpc` work in both directions, subject to the `spawn` option | B4 |
-| **L4 Cluster services** | TLS distribution compatible with `inet_tls_dist`; `global` and `pg`, compiled from OTP | B4, I3 |
+| **L2 Lifecycle** | LINK, UNLINK_ID and its acknowledgement, EXIT and EXIT2. `noconnection` is delivered to every link that crosses a lost connection. Monitor requests from OTP peers (`MONITOR_P`, `DEMONITOR_P`) are dropped silently, and `MONITOR_P_EXIT` is never sent (D21). A `gen_server:call` from an Erlang node still gets its reply, but if the BEES process dies mid-call, the caller waits for its timeout. Compiled code has no monitors (D20). | B3, I1 |
+| **L3 Remote execution** | SPAWN_REQUEST and SPAWN_REPLY, so compiled `erpc` and `rpc` work in both directions, subject to the `spawn` option | B4 (after 1.0) |
+| **L4 Cluster services** | TLS distribution compatible with `inet_tls_dist`; `global` and `pg`, compiled from OTP | B4 (after 1.0) |
+
+Exit signals crossing a node boundary follow D18.
+- An `EXIT2` arriving from an Erlang node becomes an exit request to the target's supervisor, exactly as a local
+  `exit/2` does. A remote link that fires is handled the same way on the receiving node.
+- Compiled code on BEES sees Silica's own failure shapes and atom reasons. BEES translates reasons to and from Erlang
+  terms on the wire, so OTP peers still receive well-formed `EXIT` and `DOWN` control messages.
 
 ### 4.3 Protocol components
 
 - **EPMD client:** ALIVE2 registration and PORT_PLEASE2 lookup. An optional BEES EPMD server is provided for hosts
   with no Erlang installed.
 - **Handshake:** the OTP 23+ (version 6) handshake.
-  - The challenge digest is MD5 over the cookie followed by the challenge, computed in the native edge.
+  - **Peer names are an allowlist fixed at build time** (D16). The peer's node name arrives as text in its first
+    handshake message. If the program's atom lookup does not hold that name as an atom, BEES answers with the
+    `not_allowed` status and closes the connection. Adding a peer means rebuilding the program. The BEES node's own
+    name must also be in the code.
+  - The challenge is random bytes from the native edge. The digest is MD5 over the cookie followed by the challenge. Both are re-created (S-5) before they are written to the socket, which is Silica's own (S-22).
   - The cookie is read from `cookie_file`. It is never read implicitly from `~/.erlang.cookie`, and it is never
     logged.
   - Capability flags: advertise exactly what BEES implements, plus the flags the targeted OTP releases make mandatory
@@ -426,12 +450,13 @@ posture when an operator deliberately wants it. It is a **downgrade**, as parall
   | Atoms | The Silica atom that the atom lookup holds for that spelling; a spelling the lookup does not hold is rejected (§1.2) |
   | Binaries, bitstrings | Binaries and bitstrings |
   | Tuples, lists, maps | The corresponding terms |
-  | Pids, references, ports | `bees_pid` with its node, and remote references and ports |
+  | Pids | The node plus the pid's supervision-tree address (D22). Pids from Erlang nodes keep their own id, serial and creation. A BEES address is a fixed 64-bit value (D22), so it goes on the wire directly: the high 32 bits as `NEW_PID_EXT`'s id and the low 32 bits as its serial. |
+  | References, ports | Remote references and ports, carrying their node |
   | Export funs (`fun M:F/A`) | Fun terms that run through the module table |
   | Local funs | Opaque terms; calling one raises `badfun` (gap ledger §5) |
 
-- **Node connections:** one connection process per peer node. It owns the socket through `bees_io`, the tick timer,
-  and the set of links and monitors that cross that connection, so that losing the connection fires all of them.
+- **Node connections:** one connection process per peer node. It learns of local deaths from the exit hub (D23). It owns the socket through `bees_io`, the tick timer,
+  and the set of links that cross that connection, so that losing the connection fires all of them.
 
 ### 4.4 Delivery
 
@@ -455,8 +480,8 @@ BEAM-mode TLS uses a **compatibility profile** (TLS 1.3, X25519, ECDSA or RSA ce
 
 The BEES trial tree covers every combination of:
 
-- OTP 26, 27 and 28;
-- levels L1 to L4;
+- the OTP release named in D14 (more releases may be added, but 1.0 promises only that one);
+- levels L1 and L2 (L3 and L4 join after 1.0);
 - `tcp` and `tls`;
 - both connection directions: BEES dials Erlang, and Erlang dials BEES.
 

@@ -22,6 +22,12 @@ disagree, this plan follows the implementation and the trials, and names the spe
 **BEES is the shim that lets BEAM languages be compiled to Silica and its constructs.** It is not an attempt to
 reproduce the BEAM's code API for Silica programmers.
 
+**Possible, not easy** (D19). BEES does not duplicate every BEAM type or behaviour. Its purpose is to make it
+*possible* to compile a BEAM language to Silica, not to make it easy.
+- Where Silica can already express a behaviour, however awkwardly, reproducing it is the language compiler's job.
+- BEES and Silica change only where something would otherwise be impossible.
+- How faithful a compiled program is to its behaviour on the BEAM is each compiler's business, not a BEES guarantee.
+
 The BEAM has two parts, and each is replaced differently:
 
 - **The emulator** (the bytecode interpreter) is replaced by **compilation**. Each BEAM language gets its own
@@ -29,10 +35,18 @@ The BEAM has two parts, and each is replaced differently:
   are separate projects, and all of them target one BEES **target contract**.
 - **The runtime system (ERTS)** is replaced by **Silica constructs wherever they exist** and by the **BEES shim
   wherever they do not.**
-  - Silica supplies: processes (actors), **atoms and the atom table**, supervision, gen_server, state machines, links,
-    monitors, registries, and crash containment.
-  - The BEES shim supplies the BEAM-specific parts of ERTS: **the multi-core scheduler** (D3), the term model, BIFs,
-    ETS, timers, ports, and distribution (including SEMP/TRUST).
+  - Silica supplies:
+    - processes (actors) and **per-core scheduling**: carrier threads, run queues, fairness, preemption and priority;
+    - **atoms and the atom table**;
+    - supervision, gen_server-style behaviours and state machines;
+    - links and registries;
+    - crash containment.
+  - The BEES shim supplies the BEAM-specific parts of ERTS:
+    - **balancing and placement across cores** (D3);
+    - the term model;
+    - BIFs, ETS and timers;
+    - ports;
+    - distribution, including SEMP/TRUST.
 
 ```mermaid
 graph LR
@@ -58,22 +72,44 @@ example, Elixir code calls Erlang's `lists` module, and both are compiled by dif
    atom as a Silica atom literal, so it is interned in Silica's atom table, and list it in the module's manifest for
    the atom lookup (§4.6). A binary is a `buf(uint8)` plus a bit length, never a Silica `string`. How a compiler reads
    and builds those bytes is its own choice (§4.5); the contract fixes only the representation.
+   - A local pid is an `actor_ref`. Its identity, used for equality, ordering and printing, is the actor's
+     **supervision-tree address** (D22): its supervisor's identity plus that supervisor's own sequence number for it,
+     for example `root.2.5`.
+   - A remote pid adds the node.
 2. **Process model.** A BEAM process is a **plain Silica actor** whose messages are `bees_term` values. Code that does
    not fit Silica's once-per-message behaviour (a `receive` in the middle of a function, for example) is **reshaped by
    the compiler** (D1). The compiler keeps the paused computation in the actor's state and uses BEES's runtime
    helpers: the save queue for selective receive, the `after` timers, and memory evacuation.
+   - **Every actor has a supervisor** (D18). The program knows all its supervisors and actors, and the compiler keeps
+     a key-value collection (a Silica `wbt_map`) from each supervisor position to its supervisor. A pid carries its
+     supervisor's position (D22), so the lookup never needs updating when an actor dies.
+   - `exit(Pid, Reason)` becomes a request to Pid's supervisor, which shuts Pid down and reports it.
+   - Every supervisor reports each child's exit to a **report sink** (D23): BEES's exit hub on that core.
+   - Failure messages are Silica's own. For example, an exit carries Silica's atom `failure_reason`, not an Erlang
+     term.
+   - BEES provides neither `trap_exit` nor monitors (D20). How `link` is lowered is each compiler's choice.
 3. **Calling convention.** How arguments are passed (including how more than 8 of them are packed), how results and
-   exceptions are returned (D2), and how BIFs are named and called.
+   exceptions are returned, and how BIFs are named and called. Runtime failures are not returned at all: they fail the
+   actor (D2).
 4. **Dynamic calls.** Each compiled module provides dispatch entries for `apply/3` and for its funs, together with a
    manifest. `bees_config` combines the manifests into a program-wide module table. BEES itself relies on that table
    (for TRUST, remote spawn, and `spawn/3`).
-5. **OTP behaviours.** How `supervisor`, `gen_server` and `gen_statem` callback modules are expressed as
-   implementations of Silica's `Supervisor`, gen_server and state-machine traits.
-6. **Memory and preemption.** Where compilers place **evacuation points** and **yield points**, and which BEES API
+5. **OTP behaviours.** How `supervisor`, `gen_server` and `gen_statem` callback modules are expressed with Silica's
+   `Supervisor` trait, gen_server-style behaviours and state-machine trait.
+   - A Silica behaviour is either call-only or cast-only (spec §16.2.6.1). So a `gen_server` module that handles both
+     calls and casts becomes **two Silica gen_server-style actors**, one call-only and one cast-only (D5).
+   - The contract fixes which of the two holds the state and where `handle_info` messages go.
+   - It also fixes how a client's cast followed by a call to the same server stays in order when the two travel
+     through different mailboxes.
+6. **Memory and yielding.** Where compilers place **evacuation points** and **yield points**, and which BEES API
    calls go at each (§4.2, §4.3). Both kinds of point sit at receive boundaries and tail calls, where the reshaped code
-   holds every live value explicitly. At a yield point a process whose dispatch budget is spent suspends, exactly as
-   it would at a `receive`, and the BEES scheduler runs something else. On raw chip cores, a yield point is also where
-   a `migrate_actor()` call for that process takes effect (§4.10).
+   holds every live value explicitly.
+   - Silica never interrupts a message dispatch (spec §15.1.2).
+   - So at a yield point, a process whose dispatch budget is spent **ends its dispatch**, exactly as it would at a
+     `receive`, and continues through `cast(self())`. The budget is a BEES helper that counts the work done in the
+     current dispatch.
+   - Silica's per-core scheduler then runs the other actors on that core.
+   - Dispatch boundaries are also where a `migrate_actor()` request takes effect (§4.10).
 7. **Naming.** A reserved module-name prefix for each language, plus BEES's own `bees_` prefix.
 8. **Versioning.** The contract has its own version, and BEES reports which contract versions it supports.
 
@@ -86,23 +122,26 @@ BEES contains **only the portions of the BEAM that Silica lacks.** Every gap bel
 
 | Class | Meaning | Owner | Examples |
 | --- | --- | --- | --- |
-| **U — Upstream** | Missing in Silica, but Silica is where it belongs. Either Silica's spec promises it and the runtime or compiler does not deliver it yet, or it belongs alongside what Silica already provides. A library cannot supply it. | The Silica repository. BEES tracks it as a prerequisite (Track S) and may contribute the work there. | **gen_server and state machines** (beside the `Supervisor` trait); links, monitors and trap-exit (stubs today); the **scheduler interface** that lets BEES run actors (today every actor is its own pthread); one program-wide atom table; Silica's own TCP/IP; byte buffers across the FFI boundary; bignums; region release. |
-| **B — BEES shim** | BEAM-specific runtime semantics with no place in Silica. | BEES, permanently. | **The multi-core scheduler** (D3); the `bees_term` model and Erlang term order; BIFs; ETS; timers; the receive helpers; the process dictionary helpers; ETF; TRUST; BEAM distribution; `bees_config`. |
+| **U — Upstream** | Missing in Silica, but Silica is where it belongs. Either Silica's spec promises it and the runtime or compiler does not deliver it yet, or it belongs alongside what Silica already provides. A library cannot supply it. | The Silica repository. BEES tracks it as a prerequisite (Track S) and may contribute the work there. | **gen_server and state machines** (beside the `Supervisor` trait); links (a stub today); the **per-core scheduler** the spec describes (carrier threads running many actors, with fairness, preemption and priority; today every actor is its own pthread); one program-wide atom table; Silica's own TCP/IP; byte buffers across the FFI boundary; bignums; region release. |
+| **B — BEES shim** | BEAM-specific runtime semantics with no place in Silica. | BEES, permanently. | **Balancing and placement across cores** (D3); the `bees_term` model and Erlang term order; BIFs; ETS; timers; the receive helpers; the process dictionary helpers; ETF; TRUST; BEAM distribution; `bees_config`. |
 | **C — Compiler** | Supplied by how a language compiler translates code. | **Each language's compiler, outside BEES.** BEES specifies the obligation in the target contract. | Pattern matching; reshaping code around `receive`; `try`/`catch` lowering; defunctionalized funs; per-module dispatch entries; placing evacuation points; bit syntax and integer bitwise operators, through lookups each compiler generates; compiling each language's standard library, and OTP's Erlang libraries. |
-| **E — Native edge** | Needs OS, board or cryptographic facilities Silica has no primitive for. One audited C archive behind `dangerous_bees_*` wrappers, reached through Silica's Fifi and built for each target: against the OS on hosted targets, and against the board on the raw targets (S-24). Every function has a named retirement trigger. | BEES, temporarily. | TCP sockets and kqueue/epoll (until Silica's own TCP/IP, S-22), TLS 1.3 engine, SHA-512, MD5, CSPRNG, monotonic clock. |
+| **E — Native edge** | Needs OS, board or cryptographic facilities Silica has no primitive for. Everything it returns reaches BEES only through re-creation (S-5). One audited C archive behind `dangerous_bees_*` wrappers, reached through Silica's Fifi and built for each target: against the OS on hosted targets, and against the board on the raw targets (S-24). Every function has a named retirement trigger. | BEES, temporarily. | TCP sockets and kqueue/epoll (until Silica's own TCP/IP, S-22), TLS 1.3 engine, SHA-512, MD5, CSPRNG, monotonic clock. |
 
 Consequences:
 
 - **A BEAM process is a plain Silica actor** (D1, decided). BEES does not wrap actors, ship a second actor runtime, or
   keep a process-object layer. A local pid *is* an `actor_ref`.
-- **BEES owns the scheduler** (D3, decided). It provides per-core carrier threads, run queues, work stealing,
-  fairness, a dispatch budget standing in for reductions, priorities, affinity and migration, and a separate pool for
-  blocking and dangerous actors. It schedules plain Silica actors through a **scheduler interface in the Silica
-  runtime** (S-6). The Silica runtime keeps mailboxes, links, monitors and crash containment; BEES decides which actor
-  runs, where, and for how long. The exact shape of that interface is D15.
-  - How it balances depends on who owns the cores (§4.10). On **OS-hosted** apps it balances BEAM-style between its
-    carrier threads, and a pin is at most a preference. **Running raw** on a chip, it balances BEAM-style-ish directly
-    onto the cores, using Silica's `migrate_actor()`, and a pin is exclusive.
+- **Silica schedules each core; BEES balances and places across cores** (D3, decided).
+  - Silica's runtime owns per-core scheduling: carrier threads, run queues, fairness, preemption and priority (spec
+    §15.1.2, Actor Pinning Policy, and §23.1.1).
+  - The runtime never moves an actor between cores. BEES does that, BEAM-style, entirely through `migrate_actor()` and
+    the core id given at spawn. Its jobs are:
+    - initial placement, through the placement hook;
+    - load balancing across cores;
+    - keeping blocking and `dangerous` actors on cores reserved for them, because a worker blocked in C holds its
+      carrier.
+  - What a pin guarantees depends on who owns the cores (§4.10). **OS-hosted**, an actor's binding to its core's
+    carrier thread is hard, but the OS may still move that thread. **Running raw**, a pin is exclusive.
 - **OTP behaviours are Silica traits** (D5, decided). `gen_server`, `gen_statem` and `supervisor` callback modules are
   compiled to Silica's gen_server, state-machine and `Supervisor` traits, not to OTP's Erlang implementations of
   those behaviours.
@@ -119,7 +158,7 @@ external dependency.
 
 - **Track A — On-node shim** (BEES repo). Terms and memory; the runtime helpers for processes and signals on plain
   Silica actors; BIFs and ERTS-level modules; the mapping of OTP behaviours onto Silica traits; host I/O;
-  observability; **the scheduler**.
+  observability; **balancing and placement** across cores.
 - **Track B — Inter-nodal** (BEES repo). Node identity, the two distribution modes, and the wire codecs.
 - **Track T — Target contract** (BEES repo). The contract specification and a **conformance kit**. The kit contains
   reference lowerings: hand-written Silica showing exactly what a compiler should emit for each construct. It also
@@ -155,8 +194,8 @@ the contract, until the named item removes it.
      **requires region release (S-15), which makes S-15 a 1.0 blocker.**
 3. **One OS thread per actor, 512 KB stack, 1 GiB virtual reservation per actor.**
    - *Rule:* the PoC targets thousands of processes, not millions, and spike S3 measures the real ceiling.
-   - This retires when the BEES scheduler (A6) runs many actors on each carrier thread, which needs the Silica
-     scheduler interface (S-6).
+   - This retires when Silica's runtime delivers the per-core scheduler its spec describes, with each carrier thread
+     running many actors (S-6).
    - Because of D1, a process holds no stack between messages. A scheduling step is therefore one message dispatch,
      or one dispatch-budget slice ended at a yield point, and an actor's stack is needed only while that step runs.
    - Deep body recursion in Erlang (`lists:map` over long lists) still needs growable stacks during a step: roadmap
@@ -190,36 +229,55 @@ the contract, until the named item removes it.
      over atom literals. It neither interns nor creates atoms: they remain Silica's.
    - No atom is created at run time. `list_to_atom/1` and `binary_to_atom/2` can only return an atom the lookup already
      holds (D16), and atoms arriving on the wire are accepted only if the lookup holds them
-     ([inter-nodal-modes §1.2](inter-nodal-modes.md#12-the-copy-gate)).
+     ([inter-nodal-modes §1.2](inter-nodal-modes.md#12-re-creation-and-the-ingress-gate)).
    - Spike S2 must show that atoms survive `use` boundaries. If they don't, that is S-1, and it blocks everything.
-7. **FFI taint and the `dangerous_` cascade.** Any app that uses BEES networking has a root module named
-   `dangerous_*`. FFI-derived data may not be sent to an ordinary actor *directly*, but it **may be copied, and the
-   copy sent**. *Rule:* everything that enters through the native edge reaches actors only through the **BEES copy
-   gate** (`bees_ingress`). The gate enforces size caps, depth and count bounds, UTF-8 validity, and the atom policy
-   (only atoms the atom lookup holds), and it builds fresh `bees_term` values. On any failure it drops the
-   input silently toward the peer and writes an audit entry. It is a security boundary: fuzzed as one, with no other
-   path in.
+7. **FFI taint and the `dangerous_` cascade.** BEES keeps Silica's FFI spec as written.
+   - Data returned from a `dangerous_*` module stays tainted however it is copied or transformed (FFI spec §7.4).
+   - It may not appear in `network_io` or `device_io` sequences (§7.3).
+   - A receiver must consume or discard it inside the handler for the FFI result cast (§7.6).
+
+   The resulting rules:
+   - *Rule:* FFI-derived data reaches BEES only through **re-creation** (S-5). Re-creation is a compiler-implemented
+     trait: it validates a tainted value against its declared type and limits, builds a new, pure value in a fresh
+     region, and rejects anything that does not fit.
+     - Until S-5 lands, nothing the native edge returns can leave the handler that receives it. That handler may still
+       *use* such a value to decide what to do, for example accepting or rejecting a token comparison.
+   - Re-creation checks structure. **`bees_ingress`** then does the protocol validation, on everything that arrives from
+     the network: TLS plaintext that has been re-created, and bytes from Silica's own sockets, which are untainted but
+     still untrusted.
+     - It checks frame bounds, depth and count limits, UTF-8, atoms against the atom lookup, and schemas.
+     - On any failure it drops the input silently toward the peer and writes an audit entry.
+     - It is a security boundary, fuzzed as one, with no other path in.
+   - **TLS and secure random bytes come through the native edge at first** (D17), and may become Silica built-ins
+     later. Until they do, every app that uses TRUST, BEAM mode (whose handshake needs random challenges) or
+     `crypto:strong_rand_bytes` has a root module named `dangerous_*`.
 8. **There is no package mechanism.** *Rule:* every BEES module basename starts with `bees_` (or `dangerous_bees_`).
    `bees_config` assembles the consumer's `silica.config` from BEES and the compilers' output, and generates the
    program-wide module table and atom lookup. It retires with S-7.
 9. **There is no CI.** Silica's "CI" is a human-run `make integrate` of about an hour on Apple Silicon. *Rule:* BEES
    keeps its own trial tree in Silica's format, pins the compiler generation it was verified with, and re-runs the
    tree on every compiler bump.
-10. **Placement depends on who owns the cores.** Silica runs in two kinds of environment, and what a pin means, and
-    who may move an actor, differs between them.
+10. **Placement depends on who owns the cores.** Silica's Actor Pinning Policy (spec §15.1.2) pins every actor from
+    spawn until it terminates.
+    - The runtime never moves an actor on its own.
+    - A `migrate_actor()` request takes effect at the actor's next dispatch boundary or yield point, and message order
+      is preserved.
+
+    What a pin guarantees differs by environment:
     - **Raw chip cores** (OS-free targets: **ESP32-S3** and **AArch64**). No OS shares the core, so a pin is
-      **exclusive**. The Silica runtime never moves anything; a program that wants BEAM-style balancing writes it with
-      `migrate_actor()`, and the yield points are where each migration takes effect.
-    - **OS-hosted.** The kernel owns the cores, so exclusivity is impossible. The best option is what the BEAM does:
-      balancing actors between carrier threads. A pin can at most be a preference.
-    - *Rule:* the BEES scheduler balances in both environments, in the way each one allows.
-      - **Running raw**, it balances **BEAM-style-ish** directly onto the cores. It is written with Silica's
-        `migrate_actor()` (S-23), each migration takes effect at the process's next yield point (contract item 6), and
-        it never moves a pinned process. Because of D1, a process holds no stack at a yield point, so a migration
-        carries only its actor state and mailbox.
-      - **OS-hosted**, it balances **BEAM-style** between its carrier threads, with run queues, work stealing and
-        migration, over the Silica scheduler interface (S-6). A pin is a preference that the balancer weighs, and the
-        carrier thread's own affinity is only as strong as the OS allows (on macOS, a hint).
+      **exclusive and hard**.
+    - **OS-hosted.** The actor is bound to the runtime's carrier thread for its core, and the runtime never moves it to
+      another carrier on its own. The OS still owns the cores: it may run other threads on the same core or move the
+      carrier thread, and on some hosts (Apple Silicon macOS) affinity is only a hint. Exclusive placement is never
+      guaranteed.
+    - *Rule:* BEES does balancing and placement in both environments, BEAM-style, entirely through `migrate_actor()`
+      and the core id given at spawn.
+      - **Running raw**, it balances directly onto the cores (S-23).
+      - **OS-hosted**, it balances between the runtime's carrier threads, the way the BEAM migrates processes between
+        its scheduler threads.
+      - It never moves a process the program placed explicitly.
+      - Because of D1, a process holds no stack at a dispatch boundary, so a migration carries only its actor state
+        and mailbox.
     - BEES documents what a pin means in each environment, and never promises exclusivity on an OS-hosted target.
 
 ---
@@ -233,8 +291,8 @@ milestone closes with **trials**, not with code that merely compiles.
 ```mermaid
 graph LR
   M0[Stage 0<br/>Ground truth] --> M1[Stage 1<br/>PoC]
-  M1 --> A1[A1 Terms & memory] --> A2[A2 Processes & signals] --> A3[A3 ERTS modules & BIFs] --> A4[A4 OTP behaviours<br/>on Silica traits] --> A5[A5 Host I/O &<br/>observability]
-  A2 --> A6[A6 Scheduler]
+  M1 --> A1[A1 Terms & memory] --> A2[A2 Processes & signals] --> A3[A3 ERTS modules & BIFs] --> A4[A4 OTP behaviours<br/>on Silica constructs] --> A5[A5 Host I/O &<br/>observability]
+  A2 --> A6[A6 Balancing &<br/>placement]
   M1 --> T1[T1 Contract 1.0] --> T2[T2 Conformance kit]
   M1 --> B1[B1 TRUST 1.0] --> B2[B2 TRUST multiplexing]
   M1 --> B3[B3 BEAM mode L1–L2] --> B4[B4 BEAM mode L3–L4]
@@ -252,7 +310,8 @@ graph LR
   X1 --> R1[Release 1.0]
   X2 --> R1
   B2 --> R1
-  B4 --> R1
+  B3 --> R1
+  B4 -.after 1.0.-> P
   R1 --> P[Post-1.0]
 ```
 
@@ -272,24 +331,24 @@ compiler projects can start.
 
   | Spike | Question | Kills or reshapes |
   | --- | --- | --- |
-  | **S1 Trait mapping** | Can generated code implement Silica's `Supervisor` trait with `bees_term` state and messages, specialized at compile time, across the >32-unit reclaim path? What must Silica's gen_server and state-machine traits look like to host OTP callback modules? | Contract item 5; the shape of S-17 and S-19. |
+  | **S1 Trait mapping** | Can generated code implement Silica's `Supervisor` trait with `bees_term` state and messages, specialized at compile time, across the >32-unit reclaim path? Does a `gen_server` module split into a call-only and a cast-only Silica actor keep OTP semantics (shared state, `handle_info`, cast-then-call order)? What must Silica's state-machine trait look like to host `gen_statem` modules? | Contract item 5; the shape of S-17. |
   | **S2 Cross-unit atoms** | Does a Silica atom minted in one unit compare equal in another, as a message, a state field and a case pattern? Does a generated atom lookup, a `case` over atom literals from several units, return the right spelling for each? | Everything. Failure means filing S-1 as a blocker. |
   | **S3 Actor ceiling** | Maximum live actors, and RSS/VA per actor, on 16 GB and 64 GB Macs; the cost of a spawn and of one message. | PoC scale; the urgency of S-6. |
   | **S4 Native edge** | A `dangerous_bees_native` wrapper (`clock_gettime`, `poll`) called from a `spawn_dangerous` worker. What do the naming cascade and the W4001 warning look like in a consumer app? | Every E-class component. |
   | **S5 Bytes without conversion** | Hand-lower bit-syntax matching and construction, a 64-bit float decode and encode, and `bxor` on `int64`, using only lookups and same-type arithmetic. How are `uint8` literals written and matched in a `case`? Does a 256-way `case` compile to a jump table or to a chain of comparisons? What does each lowering cost? | BEES's own codecs (ETF, framing); the guidance BEES gives compiler projects. |
   | **S6 Terms and heap** | `bees_term` as a recursive tagged tuple (`recursive_tuple_specification.md`) in a region held in actor state. Can a region be released today? What does an evacuation cost? | Contract items 1 and 6; the urgency of S-15. |
-  | **S7 Death observation** | Can BEES observe the death of an actor it does not supervise without runtime `monitor`? Expected: no, which confirms S-2. | Whether A2 can start before S-2. |
-  | **S8 Copy gate** | FFI bytes → `bees_ingress` → fresh terms → actor. Confirm the taint checker accepts the gated path, and pin the rejection of direct forwarding in a `.golden_fail` trial. | Every remote message path. |
+  | **S7 Exit reports** | Prototype D23 in a Silica branch: a supervisor that casts `(:child_exit, pid, failure_reason, restarted, new_pid)` to the report sink named in its flags after handling each child exit. Measure the cost per exit, and check that reports arrive in ingress order. | S-28; the exit hub in A2. |
+  | **S8 Re-creation** | Hand-write what a compiler-derived re-creation would generate for BEES's FFI flows: random bytes, digests, TLS peer information, TLS plaintext and ciphertext. Check the declared limits first, build in a fresh region, rebuild enumerations from literals, and return `:rejected` on any failure. Pin with a `.golden_fail` trial that today's checker rejects the direct path. | The shape of S-5; every path from the native edge. |
   | **S9 Reference lowerings** | Hand-lower four small Erlang programs into Silica exactly as the draft contract says a compiler should: a selective receive with `after` in mid-function (reshaped per D1), `try`/`catch` with stack traces, funs with `apply/3`, and binary matching. | Contract items 2–4; the first programs in the conformance kit. |
-  | **S10 Exception representation** | Measure the candidate representations for D2 across BIF calls. | Contract item 3; input to the D2 discussion. |
-  | **S11 Scheduler interface** | Can the Silica runtime let a BEES carrier thread run one message dispatch of a plain Silica actor, keeping Silica's mailbox, links, monitors and crash containment intact? Prototype it in a Silica branch and measure dispatch overhead against thread-per-actor. | D15; the shape of S-6; A6. |
+  | **S10 Failure paths** | Check that a BIF failure inside a compiled process ends the actor with an explicit reason atom, for example `(:explicit, :badarg)`. Check that the supervisor's report (D23) carries that reason, and see what Silica's crash report shows. | D2; the shape of S-9's explicit abnormal stop. |
+  | **S11 Balancing through `migrate_actor()`** | On today's runtime, what does `migrate_actor()` cost? Does it take effect at the next dispatch boundary, and does message order hold across a move? Can BEES balance well using only the work counts it keeps itself, with no load data from the runtime? | A6; whether BEES needs scheduler statistics from Silica. |
 
 - **R0.3 Contract v0.** Published as `contract/target-contract.md`, covering the eight items in §1, with the S9
   lowerings as worked examples. It starts from the construct mapping in [gap-ledger §1](gap-ledger.md). The
   maintainers of the language compiler projects are invited to review it.
 - **R0.4 Track S filed.** Each S-item becomes a short Silica issue, with a failing trial where one can be written.
 
-**Exit criteria:** all eleven spike notes are merged; D2 and D15 are recorded; contract v0 is published and has been
+**Exit criteria:** all eleven spike notes are merged; D2 is recorded; contract v0 is published and has been
 reviewed by at least one compiler project.
 
 ### Stage 1 — Proof of concept: "lowered Erlang on two nodes"
@@ -309,31 +368,38 @@ compiler would emit. If an external Erlang-to-Silica compiler exists by then, th
   - a `supervisor` callback module as a Silica `Supervisor` trait implementation.
 - **Track T slice:** contract v0 exercised end to end by the reference lowerings, and `bees_config` generating the
   program-wide module table and atom lookup.
-- **Track B slice.**
-  - **TRUST:** lowered Erlang on node A calls `trpc:call(Host, Port, {M,F,A}, Args)`, the BEAM_SEMP API. Node B runs
-    the allowlisted function through the module table, in a per-request worker. The call uses TLS 1.3 mTLS, the
-    fingerprint whitelist, and the token path.
-  - **BEAM mode:** a lowered Erlang process on a BEES node exchanges messages with a process on a real `erl -sname`
-    node, in cleartext and loudly logged as a downgrade.
+- **Track B slice.** Real network traffic needs re-creation (S-5): TLS and secure random bytes come through the
+  native edge (D17), and nothing the edge returns can leave its handler until S-5 lands. The slice is built in two
+  steps.
+  - **Protocol layers over an in-process loopback transport.** Two BEES nodes in one OS process exchange frames
+    through actors. A clearly marked, deterministic, test-only source stands in for random bytes and TLS.
+    - **TRUST:** lowered Erlang on node A calls `trpc:call(Host, Port, {M,F,A}, Args)`, the BEAM_SEMP API. Node B runs
+      the allowlisted function through the module table, in a per-request worker. The call exercises the whitelist,
+      the token path, suspicion, and framing.
+    - **BEAM mode:** the EPMD exchange, the handshake, and message delivery run between two BEES nodes.
+  - **On real sockets, once S-5 lands.** TRUST over TLS 1.3 mTLS between two BEES nodes. A lowered Erlang process
+    exchanges messages with a process on a real `erl -sname` node, in cleartext and loudly logged as a downgrade.
 
 **Exit criteria:**
 
 - Three Erlang programs produce the same output on BEES, as reference lowerings, as they do on the BEAM: a ping-pong
   with selective receive, a process ring, and a supervised worker restarted after a crash.
 - Latency and per-process memory are measured.
-- Every native-edge value reaches actors only through `bees_ingress`.
+- The TRUST and BEAM-mode protocol layers pass their trials over the loopback transport. If S-5 has not landed, the
+  real-socket step moves into B1 and B3.
+- No FFI-derived value reaches a process except through re-creation.
 - The gap ledger is updated.
 
 ### Track A — On-node shim
 
 | ID | Milestone | Contents | Blocks on | Exit criteria |
 | --- | --- | --- | --- | --- |
-| **A1** | Terms and memory | All `bees_term` types, with atoms as Silica atoms; Erlang term order and both equalities; the atom BIFs (`atom_to_list`, `list_to_existing_atom`, and `list_to_atom` per D16) as lookups in the atom lookup; maps in term order over `wbt_map`; binaries as `buf(uint8)` terms, and the binary BIFs; bignums; `term_to_binary`/`binary_to_term` (with `safe`) in Silica; the evacuation API. | S-1, S-11, S-15 | Term-order trials, and bit-syntax trials as reference lowerings, derived from OTP's `erts` test suites. A long-running process's memory stays flat under load. |
-| **A2** | Processes and signals | Runtime helpers for plain Silica actors: the save queue and `after` timers for reshaped `receive`; the process dictionary helpers; building Erlang terms (`'DOWN'`, `{'EXIT', Pid, Reason}`) from Silica's lifecycle events, on top of Silica's links, monitors and trap-exit (S-2, S-9); `exit/2`; `spawn`/`spawn_link`/`spawn_monitor`/`spawn_opt` BIFs over Silica spawn; registered names keyed by Silica atoms; timers (`send_after`, `start_timer`, `cancel_timer`, `read_timer`); `process_info`, `processes/0`, `is_process_alive/1`. | S-2, S-9; S-3 (the native clock stands in) | Signal and receive trials derived from OTP's process and signal test suites, as reference lowerings. |
-| **A3** | ERTS modules and BIFs | The `erlang` module's BIFs, in coverage tiers. `ets` (actor-owned tables over `wbt_map`, with documented concurrency differences). `persistent_term`, `atomics`, `counters`, `os`, `init` and the boot sequence, `code` over the program-wide module table. Handler back ends for compiled `logger`. `crypto` (hash, HMAC, `strong_rand_bytes`) over the native edge. | A1, A2; S-8 | Each BIF tier passes its trial subset. |
-| **A4** | OTP behaviours on Silica traits | The contract's mapping of `gen_server`, `gen_statem` and `supervisor` onto Silica's traits, with reference lowerings. `proc_lib` and `sys` runtime support. Each documented difference from OTP (`hibernate`, `code_change`, `sys` debug) goes in the README. | S-17, S-19, S-2 | OTP behaviour test cases (derived from the gen_server, gen_statem and supervisor suites) pass as reference lowerings, and every exclusion is justified. |
+| **A1** | Terms and memory | All `bees_term` types, with atoms as Silica atoms; Erlang term order and both equalities; the atom BIFs (`atom_to_list`, `list_to_existing_atom`, and `list_to_atom` per D16) as lookups in the atom lookup; maps in term order over `wbt_map`; binaries as `buf(uint8)` terms, and the binary BIFs; bignums; `term_to_binary`/`binary_to_term` (with `safe`) in Silica; the evacuation API. | S-1, S-11, S-15 | Worked programs, as reference lowerings, that exercise every term type, term comparison and bit syntax. A long-running process's memory stays flat under load. |
+| **A2** | Processes and signals | Runtime helpers for plain Silica actors:<br>• the save queue and `after` timers for reshaped `receive`;<br>• the process dictionary helpers;<br>• `exit/2` as a request to the target's supervisor, found through the compiler's actor-to-supervisor map (D18);<br>• **the per-core exit hub** (D23), which receives every supervisor's exit reports and does BEES's fixed bookkeeping: removing a dead pid's names, deleting tables it owned, ending its BEES-level link partners, and telling node connections about remote links;<br>• **a supervisor for every actor**: BEES supervisors, sharded per core, to which a plain `spawn` adds a `temporary` child;<br>• the `spawn`, `spawn_link` and `spawn_opt` BIFs over Silica spawn;<br>• registered names keyed by Silica atoms;<br>• timers (`send_after`, `start_timer`, `cancel_timer`, `read_timer`);<br>• `process_info`, `processes/0`, `is_process_alive/1`. | S-2, S-26, S-28; S-9 (soft); S-3 (the native clock stands in) | Worked programs, as reference lowerings: a selective receive with `after`, a supervised process shut down by `exit/2`, a linked pair, and a registered name that disappears when its process exits. |
+| **A3** | ERTS modules and BIFs | The `erlang` module's BIFs, in coverage tiers. **Result-returning versions of commonly caught BIFs** (D2), for example existing-atom conversions, number parsing, and `binary_to_term`, plus a call variant that returns `timeout` as a value. `ets` (actor-owned tables over `wbt_map`, with documented concurrency differences). `persistent_term`, `atomics`, `counters`, `os`, `init` and the boot sequence, `code` over the program-wide module table. Handler back ends for compiled `logger`. `crypto` (hash, HMAC, `strong_rand_bytes`) over the native edge. | A1, A2; S-8 | Each BIF tier passes its trial subset. |
+| **A4** | OTP behaviours on Silica constructs | The contract's mapping of `supervisor` onto Silica's `Supervisor` trait, `gen_server` onto a call-only and a cast-only Silica gen_server-style actor (D5), and `gen_statem` onto Silica's state-machine trait, with reference lowerings. `proc_lib` and `sys` runtime support. Each documented difference from OTP (`hibernate`, `code_change`, `sys` debug) goes in the README. | S-17, S-2 | Worked programs, as reference lowerings: a supervision tree, a split `gen_server`, and a `gen_statem`. Every difference from OTP is listed in the README. |
 | **A5** | Host I/O and observability | `bees_io`: one event loop per core, over Silica's own TCP/IP implementation (S-22), and over kqueue/epoll in the native edge until it lands. `prim_inet` under compiled `gen_tcp`/`gen_udp`/`inet`, with `{active, once}` backpressure. `prim_file` under compiled `file`. Group leaders and the I/O protocol server. Telemetry. | S-8; S-22 soft (native-edge sockets stand in) | A lowered TCP echo server holds 1,000 concurrent connections; a slow reader pauses its socket. |
-| **A6** | Scheduler | The BEES scheduler, in both environments (§4.10):<br>• a dispatch budget standing in for reductions, enforced at the compilers' yield points (contract item 6);<br>• process priorities;<br>• placement and balancing (the placement hook);<br>• overload protection and a runaway-dispatch watchdog;<br>• scheduler statistics for `erlang:statistics/1` and `erlang:system_info/1`.<br>**OS-hosted**, over the Silica scheduler interface:<br>• one carrier thread per core;<br>• per-core run queues, work stealing and migration: BEAM-style balancing;<br>• pins as preferences;<br>• a separate pool for blocking and `spawn_dangerous` actors, including every native-edge worker.<br>**Running raw** on chip cores:<br>• BEAM-style-ish balancing directly onto the cores, written with Silica's `migrate_actor()`;<br>• each migration takes effect at the process's next yield point;<br>• pins are exclusive, so a pinned process is never moved. | S-6 (scheduler interface), D15; A2; S-23 (raw) | Fairness trials: a CPU-bound process cannot starve its neighbours. OS-hosted: work stealing balances a skewed spawn, and 100,000 live processes run on a 16 GB Mac. Running raw, on ESP32-S3 and on AArch64: the balancer evens out a skewed spawn using only `migrate_actor()`, every migration takes effect at a yield point, and no pinned process ever changes core. |
+| **A6** | Balancing and placement | BEES balancing and placement across cores, in both environments (§4.10), entirely through `migrate_actor()` and the core id given at spawn:<br>• initial placement (the placement hook);<br>• BEAM-style load balancing, moving processes from busy cores to idle ones as the BEAM's work stealing does;<br>• cores reserved for blocking and `spawn_dangerous` actors, including every native-edge worker;<br>• the per-core spawn supervisors that plain `spawn` goes through (D18), each replaced by one at a fresh position before it runs out of child numbers (D22);<br>• the dispatch-budget helper that compiled code checks at its yield points (contract item 6);<br>• overload protection, and a watchdog that detects and reports runaway dispatches (Silica does not interrupt a dispatch);<br>• load statistics BEES keeps itself, for `erlang:statistics/1` and `erlang:system_info/1`. | A2; S-6 (Silica's per-core scheduler, for scale); S-23 (raw) | Using only `migrate_actor()`, a skewed spawn is evened out, OS-hosted and on ESP32-S3 and AArch64. Every migration takes effect at a dispatch boundary with message order intact. No explicitly placed process is ever moved. A CPU-bound compiled loop ends its dispatch at yield points, so its neighbours on the same core keep running. |
 
 ### Track T — Target contract
 
@@ -348,43 +414,59 @@ Details are in [inter-nodal-modes.md](inter-nodal-modes.md).
 
 | ID | Milestone | Contents | Blocks on | Exit criteria |
 | --- | --- | --- | --- | --- |
-| **B1** | TRUST 1.0 (single request) | The `trust/1` wire spec. `trpc:call/cast`, the BEAM_SEMP API. Server-side execution of allowlisted MFAs through the module table in a per-request worker. Whitelist, forbidden guard, suspicion and quarantine (D10), tokens, timeouts and limits, fail-fast config, audit log. Client side: A/AAAA resolution, stagger, per-server token cache, mutual pinning. | A2; S-17 soft (until Silica's state-machine trait lands, the connection FSM is a plain behaviour with a phase field); native TLS edge | A negative-path suite: every failure mode in the SEMP README closes the connection with no error body, writes a log entry, and changes suspicion. The frame fuzzer runs 24 hours with no crash. |
+| **B1** | TRUST 1.0 (single request) | The `trust/1` wire spec. `trpc:call/cast`, the BEAM_SEMP API. Server-side execution of allowlisted MFAs through the module table in a per-request worker. Whitelist, forbidden guard, suspicion and quarantine (D10), tokens, timeouts and limits, fail-fast config, audit log. Client side: A/AAAA resolution, stagger, per-server token cache, mutual pinning. | A2; S-17 soft (until Silica's state-machine trait lands, the connection FSM is a plain behaviour with a phase field); native TLS edge; S-5 (re-creation) | A negative-path suite: every failure mode in the SEMP README closes the connection with no error body, writes a log entry, and changes suspicion. The frame fuzzer runs 24 hours with no crash. |
 | **B2** | TRUST windowed multiplexing | Everything in the multiplexing design doc: session windows, GOAWAY, `max_inflight` with read-pause backpressure, a worker per request under a per-connection supervisor, cancel-by-close, metrics. Limits set to 1 must reproduce B1 exactly. | B1, A5 | That doc's acceptance criteria 1–10 as trials; p95 latency improves on B1. |
-| **B3** | BEAM mode L1–L2 | EPMD (client, and an optional server). The version 6 handshake. ETF on the wire. Remote pids; sending to pids and registered names; links, monitors and exit signals across nodes; `nodedown`; net ticks. The distribution BIFs (`node/0`, `nodes/0`, `monitor_node/2`). | A2, S-2 | The interoperability matrix against OTP 26, 27 and 28 passes at L1 and L2. |
-| **B4** | BEAM mode L3–L4 | SPAWN_REQUEST through the module table, subject to the scoped `spawn` option. A TLS distribution variant compatible with `inet_tls_dist`. The ERTS hooks that compiled `net_kernel`, `global` and `pg` need. | B3 | Remote spawn works in both directions against Erlang nodes; the TLS variant interoperates. With compiled OTP `erpc`/`global`/`pg`, the tests move into I3. |
+| **B3** | BEAM mode L1–L2 | EPMD (client, and an optional server). The version 6 handshake, which refuses any peer whose node name is not in the program's atom lookup (D16). ETF on the wire. Remote pids; sending to pids and registered names; links and exit signals across nodes (node connections learn of local deaths from the exit hub, D23); losing a node; net ticks. The distribution BIFs (`node/0`, `nodes/0`). Monitor requests from OTP peers are dropped (D21). | A2, S-2; S-5 (random challenges); S-22 (sockets) | L1 and L2 work, in both directions, against the OTP release named in D14. |
+| **B4** | BEAM mode L3–L4 (after 1.0) | SPAWN_REQUEST through the module table, subject to the scoped `spawn` option. A TLS distribution variant compatible with `inet_tls_dist`. The ERTS hooks that compiled `net_kernel`, `global` and `pg` need. | B3 | Remote spawn works in both directions against Erlang nodes; the TLS variant interoperates. With compiled OTP `erpc`/`global`/`pg`, the tests move into I3. |
 
 ### Integration points and cross-cutting milestones
 
 | ID | What meets | Exit criteria |
 | --- | --- | --- |
-| **I1** Remote lifecycle | A2 signals × B3 control messages | A monitor on a remote pid fires with `noconnection` when the peer node dies, and with the peer's reason when the remote process dies. |
+| **I1** Remote lifecycle | A2 exits × B3 control messages | When a remote process exits, or its node is lost, the exit reaches the local processes linked to it, through their supervisors (D18). |
 | **I2** Network I/O | A5 `bees_io` × B1 transport | TRUST and BEAM-mode sockets are ports on the A5 event loop. |
-| **I3** First external compiler | T2 kit × the first language-to-Silica compiler (expected: Erlang) | The compiler passes the conformance kit. It compiles OTP's `stdlib`, the parts of `kernel` BEES supports, and `erpc`/`global`/`pg`. Selected OTP test suites pass on BEES at a published rate, and every failure is mapped to a ledger row or a compiler issue. |
-| **X1** Cluster semantics | Membership, partitions, cluster observability | A three-node cluster mixing BEES and OTP nodes survives a partition and heals, with documented link and monitor behaviour. |
-| **X2** Scale | The BEES scheduler (A6) tuned on Silica's growable stacks (S-6) | Published benchmarks against the BEAM on the same hardware: spawn rate, message latency, fairness under load, 1 million idle processes. |
+| **I3** First external compiler | T2 kit × the first language-to-Silica compiler (expected: Erlang) | The compiler passes the conformance kit, and it compiles and runs demonstration programs of its own choosing on BEES. How faithful that compiler is to the BEAM is its own business; BEES publishes no fidelity rate. Anything the compiler finds impossible becomes a ledger row. |
+| **X1** Cluster semantics | Membership, partitions, cluster observability | A three-node cluster mixing BEES and OTP nodes survives a partition and heals, with documented link behaviour. |
+| **X2** Scale | BEES balancing (A6) on Silica's per-core scheduler and growable stacks (S-6) | Published benchmarks against the BEAM on the same hardware: spawn rate, message latency, fairness under load, 1 million idle processes. |
 
-### Release 1.0 — definition of "complete library"
+### Release 1.0 — definition of done
+
+BEES 1.0 is done when compiling a BEAM language to Silica is **possible** (D19): every BEAM construct has a route to
+Silica, and that route is demonstrated. It does not mean BEAM programs behave identically.
 
 1. **Contract.** Contract 1.0 is published, versioned and documented, and the conformance kit is available to
    compiler projects.
-2. **Shim coverage.** Every gap-ledger row marked **1.0** is closed with trials, or explicitly moved out of scope in
-   the README.
+2. **A route for every construct.** Every row of the gap ledger is one of these:
+   - closed with trials;
+   - assigned to the compilers (class C), with a **reference lowering** in the conformance kit that compiles and runs
+     on BEES;
+   - listed in the ledger's "Not provided" section.
+
+   The reference lowerings are the proof that compilation is possible.
 3. **Compiler integration.** At least one external compiler has passed I3.
-4. **Silica constructs and the BEES scheduler.** BEAM processes are plain Silica actors, run by the BEES scheduler.
-   Supervision, gen_server and state machines run on Silica's traits. BEES duplicates none of them.
-5. **Distribution.** TRUST (B1, B2) passes its conformance, negative-path and fuzz suites. BEAM mode (B3, B4) passes
-   the OTP interoperability matrix.
-6. **Security review.** An external review has covered TRUST, `bees_ingress` and the native edge, and its findings
-   are closed.
+4. **Silica constructs.**
+   - BEAM processes are plain Silica actors, and every actor has a supervisor.
+   - Silica schedules actors on each core, and BEES balances them across cores.
+   - Supervision, gen_server-style behaviours and state machines are Silica's.
+   - BEES duplicates none of them.
+5. **Distribution.** TRUST (B1, B2) passes its conformance, negative-path and fuzz suites. BEAM mode reaches L1 and L2
+   (B3) against the OTP release named in D14. L3 and L4 (B4) follow after 1.0.
+6. **Security review.** An external review has covered TRUST, `bees_ingress`, every re-creation point and the native
+   edge, and its findings are closed.
 7. **Native edge.** It is minimal and audited, and every entry has a retirement trigger.
-8. **Platforms.** Both Silica hosted AArch64 paths pass the BEES trial tree, and so do the two raw targets, ESP32-S3
-   and AArch64. To begin with, the raw targets reach the native edge's facilities (sockets, TLS, hashes, random
-   bytes, the clock) through Fifi, like the hosted targets, with the edge built against each board instead of an OS.
-   That needs Fifi on the raw targets (S-24). Each entry keeps its retirement trigger; sockets retire to Silica's own
-   TCP/IP (S-22).
+8. **Platforms.** The BEES trial tree passes on both Silica hosted AArch64 paths, and on the two raw targets, ESP32-S3
+   and AArch64.
+   - Raw AArch64 needs Silica's bare-metal AArch64 path, which does not exist yet (S-27).
+   - To begin with, the raw targets reach the native edge's facilities (TLS, random bytes, hashes, the clock) through
+     Fifi, like the hosted targets, with the edge built against each board instead of an OS. That needs Fifi on the
+     raw targets (S-24).
+   - Every edge entry keeps its retirement trigger. Sockets retire to Silica's own TCP/IP (S-22).
+9. **Documentation.** It states what BEES provides, what it deliberately does not provide (the ledger's
+   "Not provided" section), and what each compiler must do (the contract).
 
 ### Post-1.0
 
+- **BEAM mode L3 and L4** (B4): remote spawn, TLS distribution, and the hooks compiled `global` and `pg` need.
 - **Hot code upgrade**, on Silica dynamic linking and `hot_swap` (S-12). The contract gains a module-versioning
   section.
 - **NIFs**, as Silica FFI wrappers (D13).
@@ -397,28 +479,35 @@ Details are in [inter-nodal-modes.md](inter-nodal-modes.md).
 
 ## 6. Decisions
 
-Every decision has a status: **Decided** (with the date), **Open — under discussion**, or **Open**. For an open
+Every decision has a status: **Decided** (with the date), **Withdrawn**, **Open — under discussion**, or **Open**. For an open
 decision, the third column holds a *proposal* to start the discussion from; it is not a recommendation that anything
 depends on yet.
 
 | ID | Decision | Status and outcome, or proposal | Notes |
 | --- | --- | --- | --- |
 | **D1** | Process execution model. | **Decided 2026-09-14:** processes are plain Silica actors, and the compiler reshapes whatever does not fit Silica's once-per-message behaviour. BEES provides runtime helpers (save queue, `after` timers, evacuation) and does not wrap actors. | Needs no language change, because Silica forbids user `recv()` (§15.1.2). Every root is explicit at evacuation and yield points (§4.2). A process holds no stack between messages, so a scheduling step is one dispatch. |
-| **D2** | How exceptions cross the contract boundary: BIF failures, `throw`/`error`/`exit`, stack traces. | **Open — under discussion.** Proposal: result-style values, where a call returns either a value or an exception triple `{Class, Reason, Stacktrace}`. Compilers may lower `try`/`catch` however they like, as long as they honour this at contract boundaries. | Spike S10 supplies measurements. |
-| **D3** | Where the multi-core scheduler lives. | **Decided 2026-09-14: in BEES.** Carrier threads, run queues, work stealing, the dispatch budget, priorities, affinity, and the blocking pool are all BEES (A6). They run over a scheduler interface in the Silica runtime (S-6). The scheduler balances in both environments: BEAM-style between carrier threads on OS-hosted apps, and BEAM-style-ish directly onto the cores, with Silica's `migrate_actor()`, when running raw (§4.10). | How BEES drives plain Silica actors on OS-hosted apps is D15. |
+| **D2** | Runtime failures and exceptions. | **Decided 2026-09-15: nothing is caught inside the actor.**<br>• A failing BIF, a `badmatch`, `badarith`, `function_clause` or `case_clause`, and **`throw`** all **fail the actor**, and its supervisor reports the exit (D23).<br>• BIFs never return failures as values to compiled code. The actor stops with an explicit reason atom, for example `(:explicit, :badarg)` (S-9).<br>• **Compilers reject `catch` clauses, `after` clauses and Erlang's `catch Expr` at compile time**, with a diagnostic. An `after` block could never run when the body fails, because the failure ends the actor.<br>• **BEES offers result-returning versions of commonly caught BIFs**, for example `{ok, Atom} \| error` for `list_to_existing_atom`. A compiler may rewrite a `try` that catches exactly that BIF's failure into a call to the variant; otherwise the program calls the variant directly.<br>• **A call variant that returns `timeout` as a value**, rather than failing the caller when the callee doesn't reply in time. It covers the common OTP pattern of catching `exit:{timeout, _}` around `gen_server:call`.<br>• Stack traces come from Silica's crash report, through `FailureReporter`. | Silica aims to catch failures at compile time, so catching failures at run time goes against the language. The supervisor is the one place where failures are handled. The contract's calling convention therefore needs no exception representation. |
+| **D3** | Who schedules, balances and places processes. | **Decided 2026-09-15, revising 2026-09-14:** Silica's runtime owns per-core scheduling (carrier threads, run queues, fairness, preemption, priority), as its Actor Pinning Policy (§15.1.2) and §23.1.1 specify. **BEES owns balancing and placement across cores**, BEAM-style, through `migrate_actor()` (A6, §4.10). No scheduler interface is needed. | The 2026-09-14 outcome was "the scheduler lives in BEES", which the current Silica spec contradicts: it gives each core's scheduling to the runtime, and offers no hook for a library. |
 | **D4** | Language compilers. | **Decided 2026-09-14: out of scope.** Each language has its own language-to-Silica compiler, and BEES owns the target contract they share. | — |
-| **D5** | OTP behaviours. | **Decided 2026-09-14:** gen_server and state machines are Silica constructs beside the `Supervisor` trait (S-17, S-19). | — |
+| **D5** | OTP behaviours. | **Decided 2026-09-14:** gen_server and state machines are Silica constructs beside the `Supervisor` trait (S-17). **Decided 2026-09-15:** an Erlang `gen_server` that handles both calls and casts becomes **two Silica gen_server-style actors**, one call-only and one cast-only, because a Silica behaviour must be one or the other (spec §16.2.6.1). S-19 is withdrawn. | Contract item 5 must fix which of the two actors holds the state, where `handle_info` messages go, and how a client's cast followed by a call stays in order across the two mailboxes. |
 | **D6** | TLS engine for the native edge. | **Open — under discussion.** Proposal: rustls through `rustls-ffi`, unless Silica's own TLS work (S-13) settles on s2n. | rustls is memory-safe and TLS 1.3 only, supports hybrid X25519MLKEM768 and mTLS with a custom verifier, and exposes the peer certificate DER. The Rust toolchain is needed only to build the native edge. |
 | **D7** | How the two modes coexist on one node. | **Open — under discussion.** Proposal: TRUST is on by default. BEAM mode is off by default and is a separate listener, enabled explicitly, with a downgrade banner. Both may run at once. | Based on parallel-tracks.md, "Opting down to BEAM-equivalent security." |
 | **D8** | TRUST payload encoding. | **Open — under discussion.** Proposal: ETF decoded with `safe` semantics, meaning only existing atoms and no funs. | This is what the BEAM_SEMP reference does. |
-| **D9** | Should TRUST gain remote links and monitors (`trust/2`)? | **Open — under discussion.** Proposal: not for 1.0; revisit after X1. | TRUST's model is short, permissioned sessions. |
+| **D9** | Should TRUST gain remote links (`trust/2`)? | **Open — under discussion.** Proposal: not for 1.0; revisit after X1. | TRUST's model is short, permissioned sessions. |
 | **D10** | Quarantine recovery. | **Open — under discussion.** Proposal: an operator reset only, while suspicion below the limit decays on successful calls. | The SEMP README contradicts itself on this point. |
 | **D11** | Whitelist key. | **Open — under discussion.** Proposal: SHA-512 of the full certificate DER, with a documented rotation procedure. | The SEMP README describes the key two different ways. |
 | **D12** | TEMPUS in 1.0? | **Open — under discussion.** Proposal: post-1.0. | — |
-| **D13** | NIFs. | **Open — under discussion.** Proposal: not in 1.0. After 1.0, `erlang:load_nif` binds statically linked Silica FFI wrappers. | — |
-| **D14** | Which OTP release's semantics the shim's BIFs follow. | **Open — under discussion.** Proposal: one named release for 1.0, chosen at Stage 0. | BIF semantics drift between OTP releases. |
-| **D15** | How the BEES scheduler drives plain Silica actors. | **Open.** Proposal: the Silica runtime keeps each actor's mailbox, links, monitors, supervision and crash containment. Through a scheduler interface (S-6) it reports "actor X became runnable" to BEES, and exposes "run one dispatch of actor X on this thread." BEES owns the carrier threads, the queues, work stealing, and budgets. | This follows from D1 and D3. Spike S11 prototypes it. |
-| **D16** | What happens to a spelling that is not in Silica's atom table. | **Open.** Proposal: `list_to_atom/1` and `binary_to_atom/2` behave as `list_to_existing_atom/1` and `binary_to_existing_atom/2`: a lookup that raises `badarg` when it finds no atom. On the wire, `bees_ingress` rejects a frame that carries such an atom ([inter-nodal-modes §1.2](inter-nodal-modes.md#12-the-copy-gate)). | Silica's atom table is fixed at compile time, and BEES has no atom table of its own (§4.6), so no atom can be created at run time. In BEAM mode node names travel as atoms, so this also decides what happens to a peer whose node name never appears in the program. |
+| **D13** | NIFs. | **Open — under discussion.** Proposal: not in 1.0. After 1.0, `erlang:load_nif` binds statically linked Silica FFI wrappers. | Re-creation (S-5) is what would let a NIF's results reach BEAM code. |
+| **D14** | Which OTP release's semantics the shim's BIFs follow. | **Open — under discussion.** Proposal: one named release for 1.0, chosen at Stage 0. | BIF semantics drift between OTP releases. BEAM-mode interop for 1.0 is tested against this one release. |
+| **D15** | How the BEES scheduler drives plain Silica actors. | **Withdrawn 2026-09-15.** Under the revised D3, BEES does not drive actors; it moves them with `migrate_actor()`. | — |
+| **D16** | What happens to a spelling that is not in Silica's atom table. | **Decided 2026-09-15: existing atoms only, everywhere.** `list_to_atom/1` and `binary_to_atom/2` behave as `list_to_existing_atom/1` and `binary_to_existing_atom/2`: a lookup that raises `badarg` when it finds no atom. `bees_ingress` rejects any frame carrying an atom the program does not hold, in both modes. In BEAM mode, **every node allowed to connect must be named in the code**. A peer whose node name is not in the atom lookup is refused at the handshake with the protocol's `not_allowed` status. | Chosen for security: the set of BEAM-mode peers is fixed when the program is built, and no peer can make the program hold a new atom. Consequences: adding a BEAM-mode peer means rebuilding the program, and cluster membership that changes at run time (for example nodes with generated names) is not supported in BEAM mode. The BEES node's own name must also be in the code. Rejected: *foreign atoms*, which would carry an unknown spelling as a term value. |
+| **D17** | TLS and secure random bytes. | **Decided 2026-09-15:** they come through the native edge (Fifi) at first, and may become Silica built-ins later. | Consequences: TRUST, BEAM mode's handshake challenges and `crypto:strong_rand_bytes` all depend on re-creation (S-5). Every app that uses them has a root module named `dangerous_*` until the built-ins arrive. |
+| **D18** | Exits and supervision. | **Decided 2026-09-15:**<br>• BEES requires every actor to have a supervisor.<br>• `exit(Pid, Reason)` is lowered by the language compiler into a request to Pid's supervisor, which shuts Pid down and reports it.<br>• The compiler finds that supervisor through a key-value collection it builds from a Silica collection (the program knows all its supervisors and actors).<br>• Failure messages do not have to match the BEAM's.<br>• `trap_exit` is not provided; how `link` is lowered is each compiler's choice. | This resolves contradiction 4 without changing Silica's supervisor-only trapping or its atom-only `failure_reason`. What still needs Silica: S-26 (actor identity by supervision-tree address, D22) and S-9 (stopping and shutdown). Because a restarted child gets a new address, an exit request aimed at an old pid never reaches its replacement. Where a supervisor's report goes is D23. |
+| **D19** | What BEES is for. | **Decided 2026-09-15: possible, not easy.** BEES does not duplicate every BEAM type or behaviour. It makes compiling a BEAM language to Silica possible. Reproducing BEAM behaviour that Silica can express is the compiler's job, and fidelity to the BEAM is not a BEES guarantee (§1). | This reshaped the definition of done: 1.0 is reached when every construct has a demonstrated route, not a published fidelity rate. |
+| **D20** | Monitors. | **Decided 2026-09-15: monitors are not part of BEES.** BEES neither provides `erlang:monitor/2`, `spawn_monitor` or `monitor_node` to compiled code nor uses Silica monitors itself. | The main BEAM uses of monitors are covered another way or left to compilers. A pending Silica `call` already wakes with the callee's death result, and supervisors handle fate-sharing. Cleaning up after a client that dies, and waiting for work to finish, are for compilers to build from what Silica and BEES provide. S-25 is withdrawn and S-2 narrows to links. |
+| **D21** | What BEAM mode does with monitor requests from OTP peers. | **Decided 2026-09-15: reject them, by dropping them silently.** This applies to standard BEAM distribution mode only; TRUST has no remote pids, links or monitors, so it never receives them. BEES ignores `MONITOR_P` and `DEMONITOR_P` from Erlang nodes and never sends `MONITOR_P_EXIT`. | The distribution protocol has no "refused" reply; its only answer is `MONITOR_P_EXIT`, which means the target is dead. `gen_server:call` monitors its target first, so answering that way would make every call from an OTP node to a BEES process fail with `noproc`. With the requests dropped, calls still get their replies. A caller whose BEES target dies mid-call waits out its timeout. If the BEES node disconnects, OTP's own connection handling still fires the caller's monitor with `noconnection`. |
+| **D22** | Actor identity. | **Decided 2026-09-15: the supervision-tree address.** An actor's identity is its supervisor's identity plus that supervisor's own sequence number for it (for example `root.2.5`).<br>• Each supervisor numbers only its own children, while it processes its own requests, so no counter is shared.<br>• Numbers are never reused, so a restarted child has a new identity.<br>• Order is lexicographic by address, and a remote pid is the node plus the address.<br>• **Fixed-size, 64 bits** (decided 2026-09-15), so a pid maps directly onto the BEAM wire's 32-bit id and 32-bit serial. The layout is a 32-bit supervisor position plus a 32-bit child number, and numbering continues across a supervisor's restarts. Supervisors started at run time take positions from a block that their parent owns; `bees_config` reserves those blocks. BEES's per-core spawn supervisors move to a fresh position before they run out of child numbers (S-26).<br>• **A stale ref never equals a live actor.** That is enough; detecting stale refs is not required.<br>• **Named actors compare by pid, as in Erlang.** A name is a lookup, not an identity. A restarted named actor is reachable by the same name, but its new pid does not compare equal to the old one. | This belongs in Silica (S-26), because Silica's runtime-owned supervisors assign the numbers. Rejected: a program-wide counter (shared state that every spawn touches), generational slots, and random 128-bit identities. Today an `actor_ref` is a pointer to a control block that is freed when the actor dies, so the address can be reused. Roots, decided the same day: every address starts at a root supervisor, which the programmer starts in `main` (not an actor) and whose address is its name. |
+| **D23** | Where a supervisor's exit reports go. | **Decided 2026-09-15:** every supervisor's flags name a **report sink**. After it handles a child's exit, whether or not it restarts the child, the runtime casts a fixed-shape report to the sink. The proposed shape is `(:child_exit, pid, failure_reason, restarted, new_pid)`. `bees_config` points each supervisor at **BEES's exit hub** on its core. The hub does fixed bookkeeping only: removing names, deleting owned tables, ending BEES-level link partners, and telling node connections about remote links. | With every actor supervised (D18) and no monitors (D20), supervisor reports are the only reliable news of a death. The sink is a purpose-built actor whose message type is the report type, so the typing problem behind the withdrawn S-25 does not return. The hub offers no subscription API, so it gives compiled code nothing that works like a monitor. Needs Silica: S-28. Rejected: querying supervisors only when needed (links and remote links would have to poll), and actors reporting their own deaths (which misses abrupt deaths). |
 
 ## 7. Top risks
 
@@ -429,7 +518,8 @@ depends on yet.
 | Region evacuation is too slow, or S-15 is late. | Long-lived processes cannot run. | Spike S6 first; push S-15 early; tune evacuation thresholds in A1. |
 | Track S items slip or are declined (especially S-1, S-2, S-6, S-11, S-15, and S-24 for the raw targets). | Stage 1, A1, A2, A6 and conformance stall. | File them early with failing trials, and offer to implement them. For S-6, spike S11 produces a working prototype of the interface to propose. |
 | Byte handling through lookups is too slow (a 256-way `case` per byte; float encode and decode). | Binary-heavy code and ETF run slowly. | Spike S5 measures before A1; each compiler chooses its own lowering; BEES tunes its own codecs. |
-| The Silica scheduler interface (S-6) turns out too narrow for a BEAM-grade scheduler. | A6 cannot deliver fairness or scale. | Spike S11 measures before A6 starts. The requirements come from A6's exit criteria, not from Silica's current runtime. |
+| Balancing only through `migrate_actor()` is too coarse: the runtime gives no load data, and a move takes effect only at a dispatch boundary. | A6 cannot even out load well enough. | Spike S11 measures before A6 starts. BEES keeps its own per-process work counts, and asks Silica for scheduler statistics if they prove necessary. |
 | A defect in `bees_ingress`. | Remote input reaches processes unvalidated. | One gate, no bypass, kept small, fuzzed per validator, inside the external review. |
+| Re-creation (S-5) is late, or narrower than BEES's FFI flows need. | No real network traffic: Track B stays on the loopback transport. | Spike S8 gives Silica concrete shapes to implement. The protocol layers keep moving over the loopback transport, so only the last step waits. |
 | Silent miscompilation in the Silica compiler, amplified by the volume of generated code. | Wrong answers even with green trials. | Differential testing against a reference BEAM; minimize any reproducer to a Silica trial immediately; pin compiler generations. |
 | OTP semantics drift. | BIFs diverge from newer OTP releases. | D14 pins one release; the interop matrix is re-run for each new OTP release. |
