@@ -123,7 +123,6 @@ graph LR
   S_28([S-28])
   S_2([S-2])
   S_9([S-9])
-  S_1([S-1])
   S_15([S-15])
   S_11([S-11])
   S_17([S-17])
@@ -176,7 +175,6 @@ graph LR
   R0_3 --> M0
   S7 --> S_28
   S10 --> S_9
-  S2 --> S_1
   S6 --> S_15
   S1 --> S_17
   S3 --> S_6
@@ -271,7 +269,7 @@ land in time; if one slips, everything that closes after it slips with it.
 
 - **Wave 0:** R0.1, S12, S-26, S-2, S-29, S-3, S-11, S-8, S-22, S-31, S-32, EXT
 - **Wave 1:** S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S13
-- **Wave 2:** R0.3, S-5, S-28, S-9, S-1, S-15, S-17, S-6, S-23, S-24, S-21
+- **Wave 2:** R0.3, S-5, S-28, S-9, S-15, S-17, S-6, S-23, S-24, S-21
 - **Wave 3:** M0, T1 (closes in wave 8)
 - **Wave 4:** M1.A
 - **Wave 5:** M1.T, M1.B
@@ -289,7 +287,7 @@ land in time; if one slips, everything that closes after it slips with it.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | **R0.1** | Repository, trial harness, bees_config skeleton | BEES | `tools` | — | — | — | S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S13, M0 |
 | **S1** | Spike: trait mapping (Supervisor, split gen_server, state-machine shape) | BEES | `trials` | R0.1 | — | — | R0.3, M0, S-17 |
-| **S2** | Spike: cross-unit atoms | BEES | `trials` | R0.1 | — | — | R0.3, M0, S-1 |
+| **S2** | Spike: cross-unit atoms | BEES | `trials` | R0.1 | — | — | R0.3, M0 |
 | **S3** | Spike: actor ceiling and spawn/message cost | BEES | `trials` | R0.1 | — | — | M0, S-6 |
 | **S4** | Spike: native edge (clock_gettime, poll) through spawn_dangerous | BEES | `native` | R0.1 | — | — | M0, S-24, M1.N |
 | **S5** | Spike: bytes without conversion; int64/float64 comparison (open) | BEES | `trials` | R0.1 | — | — | R0.3, M0, S-21 |
@@ -310,7 +308,6 @@ land in time; if one slips, everything that closes after it slips with it.
 | **S-9** | Stopping and shutdown for ordinary actors | Silica | `silica` | S10 | — | — | — |
 | **S-29** | Atom-keyed registry | Silica | `silica` | — | — | — | — |
 | **S-3** | Monotonic clock and timers | Silica | `silica` | — | — | — | — |
-| **S-1** | Atom identity across units (only if S2 fails) | Silica | `silica` | S2 | — | — | — |
 | **S-15** | Region release inside a living actor | Silica | `silica` | S6 | — | — | — |
 | **S-11** | Big integers | Silica | `silica` | — | — | — | — |
 | **S-17** | State-machine behaviour trait | Silica | `silica` | S1 | — | — | — |
@@ -327,7 +324,7 @@ land in time; if one slips, everything that closes after it slips with it.
 | **M1.B** | PoC protocol layers over an in-process loopback transport (TRUST call path; EPMD, handshake, delivery) | BEES | `inter_nodal` | M1.A | — | — | M1.N, M1 |
 | **M1.N** | PoC on real sockets: TRUST over mTLS between two BEES nodes; cleartext to an erl -sname node | BEES | `inter_nodal` | M1.B, S-5, S12, S4 | — | — | — |
 | **M1** | Stage 1 exit: three programs match the BEAM; latency and memory measured; ledger updated | BEES | `plan` | M1.A, M1.T, M1.B | — | M1.N (deferred to B1 and B3) | A1, A2, B1, B3 |
-| **A1** | Terms and memory | BEES | `shim` | M1 | S-11, S-15 | S-1 (only if spike S2 failed) | A3 |
+| **A1** | Terms and memory | BEES | `shim` | M1 | S-11, S-15 | — | A3 |
 | **A2** | Processes and signals (save queue, pdict, exit/2 via position map, exit hub, spawn supervisors, names, timers) | BEES | `shim` | M1 | A1, S-2, S-26, S-28 | S-9 (shutdown: 0, no terminate/2); S-29 (BEES name table, hub removes names); S-3 (native clock through the edge) | A3, A4, A6, I1 |
 | **A3** | ERTS modules and BIFs (tiers, result-returning variants, ets, persistent_term, code, bees_log, crypto) | BEES | `shim` | A1, A2 | S-5, S-8 | — | A5 |
 | **A4** | OTP behaviours on Silica constructs (Supervisor, split gen_server, state machine; proc_lib/sys support) | BEES | `shim` | A2 | S-17, S-2 | — | X2 |

@@ -17,3 +17,5 @@ silica.needs_runtime
 silica.link
 .integrate_counts
 .fail/
+lib/bees_atoms.silica
+lib/bees_atoms.index

@@ -1,30 +1,23 @@
 module bees_spike_atom_b;
-// Spike S2: unit B classifies atoms it did not mint. Its first-appearance order is
-// :apple, :mango, :zebra, the reverse of unit A's, so a per-unit numbering that leaked
-// into comparisons would misclassify.
+// Spike S2: unit B classifies atoms it did not mint. Under D30 it has no atom literal and no
+// atom pattern: it switches on bees_atoms@index (the canonical index a compiler would read from
+// bees_atoms.index) and compares with ==.
+use bees_atoms;
 
 export classify/1;
 export is_mango/1;
 export spelling/1;
 
+// canonical indices from bees_atoms.index: apple 0, mango 1, zebra 2
 fn classify(a: atom) -> int64 {
-    case a of {
-        :apple -> 1;
-        :mango -> 2;
-        :zebra -> 3;
-        _: atom -> 0
+    case bees_atoms@index(a) of {
+        0 -> 1;
+        1 -> 2;
+        2 -> 3;
+        _: int64 -> 0
     }
 }
 
-fn is_mango(a: atom) -> boolean { a == :mango }
+fn is_mango(a: atom) -> boolean { a == bees_atoms@a_mango() }
 
-// An atom lookup of the kind bees_config will generate (roadmap §4.6): a case over
-// atom literals returning each spelling as a string literal.
-fn spelling(a: atom) -> string {
-    case a of {
-        :apple -> "apple";
-        :mango -> "mango";
-        :zebra -> "zebra";
-        _: atom -> "?"
-    }
-}
+fn spelling(a: atom) -> string { bees_atoms@spelling(a) }

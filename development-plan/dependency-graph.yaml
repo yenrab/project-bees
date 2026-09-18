@@ -167,14 +167,6 @@ nodes:
     start: []
     close: []
     soft: []
-  - id: "S-1"
-    title: "Atom identity across units (only if S2 fails)"
-    owner: "Silica"
-    area: "silica"
-    start: ["S2"]
-    close: []
-    soft: []
-    note: "Conditional on spike S2."
   - id: "S-15"
     title: "Region release inside a living actor"
     owner: "Silica"
@@ -294,7 +286,7 @@ nodes:
     area: "shim"
     start: ["M1"]
     close: ["S-11", "S-15"]
-    soft: [["S-1", "only if spike S2 failed"]]
+    soft: []
   - id: "A2"
     title: "Processes and signals (save queue, pdict, exit/2 via position map, exit hub, spawn supervisors, names, timers)"
     owner: "BEES"

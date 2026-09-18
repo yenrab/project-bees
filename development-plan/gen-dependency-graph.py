@@ -49,7 +49,6 @@ TS = [
     ("S-9",  "Stopping and shutdown for ordinary actors", ["S10"], ""),
     ("S-29", "Atom-keyed registry", [], ""),
     ("S-3",  "Monotonic clock and timers", [], ""),
-    ("S-1",  "Atom identity across units (only if S2 fails)", ["S2"], "Conditional on spike S2."),
     ("S-15", "Region release inside a living actor", ["S6"], ""),
     ("S-11", "Big integers", [], ""),
     ("S-17", "State-machine behaviour trait", ["S1"], ""),
@@ -79,8 +78,7 @@ node("M1", "Stage 1 exit: three programs match the BEAM; latency and memory meas
      start=["M1.A", "M1.T", "M1.B"], soft=[["M1.N", "deferred to B1 and B3"]])
 
 # ---------------- Track A ----------------
-node("A1", "Terms and memory", "BEES", "shim", start=["M1"], close=["S-11", "S-15"],
-     soft=[["S-1", "only if spike S2 failed"]])
+node("A1", "Terms and memory", "BEES", "shim", start=["M1"], close=["S-11", "S-15"])
 node("A2", "Processes and signals (save queue, pdict, exit/2 via position map, exit hub, spawn supervisors, names, timers)",
      "BEES", "shim", start=["M1"], close=["A1", "S-2", "S-26", "S-28"],
      soft=[["S-9", "shutdown: 0, no terminate/2"], ["S-29", "BEES name table, hub removes names"], ["S-3", "native clock through the edge"]])

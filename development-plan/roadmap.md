@@ -124,7 +124,8 @@ example, Elixir code calls Erlang's `lists` module, and both are compiled by dif
      what a yield costs against mailbox depth.
    - Silica's per-core scheduler then runs the other actors on that core.
    - Dispatch boundaries are also where a `migrate_actor()` request takes effect (§4.10).
-7. **Naming.** A reserved module-name prefix for each language, plus BEES's own `bees_` prefix.
+7. **Naming.** A reserved module-name prefix for each language, plus BEES's own `bees_` prefix. Each module
+   ships an atom manifest (D30).
 8. **Versioning.** The contract has its own version, and BEES reports which contract versions it supports.
 
 No `.beam` file is loaded at run time and no bytecode is interpreted. Running Erlang/OTP systems are reached on the
@@ -185,7 +186,7 @@ external dependency.
 - **Track S — Silica prerequisites** (Silica repo). The class-U items in the
   [gap ledger](gap-ledger.md#3-track-s--silica-prerequisites). BEES files each one as the smallest reasonable proposal,
   with a reproducing trial, and may implement it. **S-5 is the critical path** and is filed first (R0.4); behind it
-  come S-26 and S-28 (A2), S-1 (everything, if spike S2 fails), S-15 (A1) and S-6 (X2). That work follows Silica's own rules: fixed points, trial goldens,
+  come S-26 and S-28 (A2), S-15 (A1) and S-6 (X2). S-1 is filed as a spec defect but no longer blocks BEES (D30). That work follows Silica's own rules: fixed points, trial goldens,
   and `AI_POLICY.md` (human-vetted, no AI co-authors, smallest reasonable PRs).
 - **External dependency: the language compilers.** They are not BEES work. BEES publishes the contract early (Stage
   0), keeps it stable, and uses the first available compiler (expected to be Erlang's) as its integration partner
@@ -238,19 +239,28 @@ the contract, until the named item removes it.
      Anything that still passes through the native edge, such as TLS records until S-13 and file data, needs
      `buf(uint8)` across the FFI boundary (S-21); until then the edge packs bytes into records of `uint64` words.
 6. **Atoms belong to Silica, and Silica's atom table is fixed at compile time.** The spec interns every atom into one
-   global atom table (§4.1.7). There is no dynamic atom table: nothing adds an atom at run time. In the
-   implementation, atoms are numbered per compilation unit.
+   global atom table (§4.1.7). There is no dynamic atom table: nothing adds an atom at run time. The
+   implementation numbers atoms **per compilation unit** (spike S2, SD-3), and only the number crosses a unit
+   boundary, so **every BEAM atom literal lives in one generated unit, `bees_atoms`** (D30).
    - *Rule:* a BEAM atom **is** a Silica atom. **BEES has no atom table of its own.** Compilers emit every atom as a
      Silica atom literal, so a program's atoms are exactly the atoms in its compiled code.
    - **Silica has no type conversion, and BEES adds none.** `atom_to_list/1`, `list_to_existing_atom/1`, printing and
      ETF are therefore **lookups**, not conversions. Each compiler lists the atoms its code uses in the module's
-     manifest, and `bees_config` generates a program-wide **atom lookup** from the manifests, beside the module table.
-     The lookup pairs each atom literal with its spelling as a string literal; for example, `atom_to_list` is a `case`
-     over atom literals. It neither interns nor creates atoms: they remain Silica's.
+     manifest, and `bees_config` generates the unit **`bees_atoms`** from the manifests: one accessor per atom
+     (`bees_atoms@a_mango() -> atom { :mango }`), `spelling(a) -> string` (a `case` over the literals, correct
+     because it is inside that unit), `from_spelling(s)`, and `index(a) -> int64`, the canonical index compilers
+     switch on. It neither interns nor creates atoms: they remain Silica's.
+   - *Rule (D30):* **outside `bees_atoms`, no unit writes a BEAM atom literal.** Compiled code and the shim obtain
+     atom values from the accessors and compare them with `==`, or switch on `index(a)`. A `case` with an atom
+     pattern is written only for the runtime's 23 fixed atoms (`:ok`, `:normal`, `:permanent`, …), which every
+     unit numbers identically. `bees_config` checks the rule.
    - No atom is created at run time. `list_to_atom/1` and `binary_to_atom/2` can only return an atom the lookup already
      holds (D16), and atoms arriving on the wire are accepted only if the lookup holds them
      ([inter-nodal-modes §1.2](inter-nodal-modes.md#12-re-creation-and-the-ingress-gate)).
-   - Spike S2 must show that atoms survive `use` boundaries. If they don't, that is S-1, and it blocks everything.
+   - Spike S2 showed that atoms do **not** survive unit boundaries (SD-3); D30 is the answer. S-1 stays filed with
+     Silica as a spec defect, but BEES no longer waits on it. Stdlib units that exchange atoms with callbacks
+     (`wbt_map`'s `:less | :equal | :greater`) keep the per-unit problem; BEES either writes its own
+     term-ordered map or relies knowingly on matching first-appearance order.
 7. **FFI taint and the `dangerous_` cascade.** BEES keeps Silica's FFI spec as written.
    - Data returned from a `dangerous_*` module stays tainted however it is copied or transformed (FFI spec §7.4).
    - It may not appear in `network_io` or `device_io` sequences (§7.3).
@@ -273,7 +283,8 @@ the contract, until the named item removes it.
      `crypto:strong_rand_bytes` has a root module named `dangerous_*`.
 8. **There is no package mechanism.** *Rule:* every BEES module basename starts with `bees_` (or `dangerous_bees_`).
    `bees_config` assembles the consumer's `silica.config` from BEES and the compilers' output, and generates the
-   program-wide module table and atom lookup. It retires with S-7.
+   program-wide module table and the `bees_atoms` unit (D30), which is generated last and compiled first. It
+   retires with S-7.
 9. **There is no CI.** Silica's "CI" is a human-run `make integrate` of about an hour on Apple Silicon. *Rule:* BEES
    keeps its own trial tree in Silica's format, pins the compiler generation it was verified with, and re-runs the
    tree on every compiler bump.
@@ -347,14 +358,14 @@ compiler projects can start.
     conformance kit), `native/`, `trials/`, `tools/`.
   - A trial harness mirroring Silica's `trials/silica_compiler.mk` (the exit-75 reclaim loop, `.scout` and
     `.golden_fail` goldens).
-  - `bees_config`.
+  - `bees_config`, first as the generator of `bees_atoms` (D30).
 - **R0.2 Feasibility spikes.** Each produces a short findings note under `development-plan/spikes/` and at least one
   trial.
 
   | Spike | Question | Kills or reshapes |
   | --- | --- | --- |
   | **S1 Trait mapping** | Can generated code implement Silica's `Supervisor` trait with `bees_term` state and messages, specialized at compile time, across the >32-unit reclaim path? Does a `gen_server` module split into a call-only and a cast-only Silica actor keep OTP semantics (shared state, `handle_info`, cast-then-call order)? What must Silica's state-machine trait look like to host `gen_statem` modules? | Contract item 5; the shape of S-17. |
-  | **S2 Cross-unit atoms** | Does a Silica atom minted in one unit compare equal in another, as a message, a state field and a case pattern? Does a generated atom lookup, a `case` over atom literals from several units, return the right spelling for each? | Everything. Failure means filing S-1 as a blocker. |
+  | **S2 Cross-unit atoms** | **Run 2026-09-17: failed** (atoms are numbered per unit, SD-3), then **passed under D30**: every BEAM atom literal lives in the generated `bees_atoms` unit, and the trial shows values from it agreeing across three units. | Everything. Led to D30. |
   | **S3 Actor ceiling** | Maximum live actors, and RSS/VA per actor, on 16 GB and 64 GB Macs; the cost of a spawn and of one message. | PoC scale; the urgency of S-6. |
   | **S4 Native edge** | A `dangerous_bees_native` wrapper (`clock_gettime`, `poll`) called from a `spawn_dangerous` worker. What do the naming cascade and the W4001 warning look like in a consumer app? | Every E-class component. |
   | **S5 Bytes without conversion** | Hand-lower bit-syntax matching and construction, a 64-bit float decode and encode, and `bxor` on `int64`, using only lookups and same-type arithmetic. How are `uint8` literals written and matched in a `case`? Does a 256-way `case` compile to a jump table or to a chain of comparisons? What does each lowering cost? **Yet to be determined:** how `bees_cmp` compares an `int64` with a `float64` exactly, with no conversion between them, as Erlang term order requires (`1 == 1.0`). | BEES's own codecs (ETF, framing); the guidance BEES gives compiler projects. |
@@ -540,6 +551,7 @@ depends on yet.
 | **D27** | TLS 1.3 session resumption in TRUST. | **Open — decided on B1's latency numbers.** If allowed: single-use, short-lived tickets bound to the peer fingerprint, and still no 0-RTT (inter-nodal-modes §3.5). | The one decision the inter-nodal document cites that is not yet made. |
 | **D28** | How compiled code learns that a node is down, in BEAM mode. | **Decided 2026-09-17: by sending to it.** A send to a pid or registered name on a node that cannot be reached, after the reconnection attempt OTP would also make, fails the sender with `noconnection`, or returns it from the result-returning variant (D2). BEES pushes no `nodedown` notification, and `monitor_node` and `net_kernel:monitor_nodes` are not provided (§5 of the ledger). Links crossing a lost connection still get `noconnection` (L2). | Compilers build anything monitor-like on top of this, for the languages that want it. The OTP side of a lost connection still sees its own `nodedown`. |
 | **D29** | Platforms for 1.0. | **Decided 2026-09-17:** three hosted targets, **Apple Silicon, Linux AArch64 and Linux x86_64**, and one OS-free target, the **ESP32-S3**. Bare-metal AArch64 is dropped (S-27 withdrawn). The OS-free port reaches TCP/IP and TLS through the board's existing C libraries (lwIP under ESP-IDF, and a C TLS library, D6), wrapped as `dangerous_*` modules behind the native edge. BEES provides no HTTP. | Linux x86_64 needs a Silica emitter (S-32). |
+| **D30** | Where BEAM atom literals live. | **Decided 2026-09-17: in one generated unit, `bees_atoms`, and nowhere else.** Silica's fixed point numbers atoms per compilation unit and only the number crosses a unit boundary (spike S2, SD-3), so a value is an atom everyone agrees on only if every literal is written in the same unit. `bees_config` collects the atoms from every module's manifest into a temporary list, generates `bees_atoms.silica` from it (accessors, `spelling`, `from_spelling`, `index`), deletes the list, and compiles that unit first so the others can `use` it. Every other unit, shim and compiled code alike, obtains atom values from the accessors and compares them with `==` or switches on `index(a)`; the runtime's 23 fixed atoms may still be written as literals anywhere. | Atoms stay Silica atoms in Silica's table, and BEES still has no atom table: `bees_atoms` is the atom lookup that §4.6 already planned, now also the only home of the literals. Separate `.o` files are kept. Costs: an accessor call per atom reference (nanoseconds; not an actor, which would cost a message), no atom patterns in `case` outside the unit, and stdlib callback atoms (`wbt_map`'s comparator results) remain per-unit. Rejected: one compilation unit for the whole program (no per-unit reclaim, no `module@fn`); a BEES atom table of integers. |
 
 ## 7. Top risks
 
@@ -548,7 +560,7 @@ depends on yet.
 | No external compiler is ready when the shim is. | I3 and 1.0 slip, and the shim is validated only by hand-written lowerings. | Publish contract v0 at Stage 0; the conformance kit makes a compiler's first steps cheap; the reference lowerings keep BEES testable on its own. |
 | The contract underspecifies something two compilers then do differently. | Code compiled by different compilers cannot interoperate. | Cross-language rules in T1; the conformance kit includes cross-language programs; the contract is versioned. |
 | Region evacuation is too slow, or S-15 is late. | Long-lived processes cannot run. | Spike S6 first; push S-15 early; tune evacuation thresholds in A1. |
-| Track S items slip or are declined (S-5 above all; then S-26 and S-28 for A2, S-1, S-2, S-15, S-6 and S-11, S-24 for the ESP32-S3, and S-32 for Linux x86_64). | Stage 1, A1, A2, A6 and conformance stall. | File them early with failing trials, in the order §3 gives, and offer to implement them. For S-6, spike S3's numbers say how many actors per carrier thread Silica's scheduler must reach, and spike S11's balancer is the first consumer of it. |
+| Track S items slip or are declined (S-5 above all; then S-26 and S-28 for A2, S-2, S-15, S-6 and S-11, S-24 for the ESP32-S3, and S-32 for Linux x86_64). | Stage 1, A1, A2, A6 and conformance stall. | File them early with failing trials, in the order §3 gives, and offer to implement them. For S-6, spike S3's numbers say how many actors per carrier thread Silica's scheduler must reach, and spike S11's balancer is the first consumer of it. |
 | Byte handling through lookups is too slow (a 256-way `case` per byte; float encode and decode). | Binary-heavy code and ETF run slowly. | Spike S5 measures before A1; each compiler chooses its own lowering; BEES tunes its own codecs. |
 | Balancing only through `migrate_actor()` is too coarse: the runtime gives no load data, and a move takes effect only at a dispatch boundary. | A6 cannot even out load well enough. | Spike S11 measures before A6 starts. BEES keeps its own per-process work counts, and asks Silica for scheduler statistics if they prove necessary. |
 | A defect in `bees_ingress`. | Remote input reaches processes unvalidated. | One gate, no bypass, kept small, fuzzed per validator, inside the external review. |
