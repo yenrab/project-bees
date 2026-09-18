@@ -19,3 +19,5 @@ silica.link
 .fail/
 lib/bees_atoms.silica
 lib/bees_atoms.index
+native/build/
+native/dangerous_exposure_source/lib/

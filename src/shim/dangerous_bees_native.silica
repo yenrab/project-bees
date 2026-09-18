@@ -1,0 +1,49 @@
+module dangerous_bees_native;
+// NOT YET COMPILABLE AS A LIBRARY UNIT (SD-17): Silica's FFI placement checks require the
+// foreign declarations, the worker behaviour and the spawn_dangerous site in one unit, and forbid
+// calling any dangerous_* function from a plain unit. Until that changes, each program's
+// dangerous root module carries this text (trials/s04_native_edge shows the working shape).
+// The Silica face of the BEES native edge (gap ledger §4). Raw foreign bindings are never
+// exported and may be called only inside `sequence proc[external_danger]` directly in a
+// spawn_dangerous worker behaviour (E4041; a call elsewhere compiles and faults, SD-15). So this
+// module exports worker behaviours, one per group of entries, and BEES spawns them with
+// spawn_dangerous, through the installer exported beside each worker (the FFI placement check
+// wants the spawn_dangerous site in the worker's own unit). A request is (op, arg); the worker
+// casts (op, result) to reply_to.
+//   op 1: clock_monotonic_ns        result: nanoseconds
+//   op 2: clock_system_ns           result: nanoseconds since the epoch
+//   op 3: poll_wait_ms(arg)         result: nanoseconds actually waited
+// Every result is FFI-derived: the receiver consumes it in its own handler (FFI spec §7.6)
+// until re-creation (S-5) lands.
+
+export start_clock_worker/1;
+
+wrapper_meta "dangerous_exposure_source/bees/silica_bees_native_wrapper.meta";
+
+foreign c_wrapper "bees_clock_monotonic_ns"
+fn clock_monotonic_ns_raw() -> int64;
+
+foreign c_wrapper "bees_clock_system_ns"
+fn clock_system_ns_raw() -> int64;
+
+foreign c_wrapper "bees_poll_wait_ms"
+fn poll_wait_ms_raw(ms: int64) -> int64;
+
+fn clock_worker(msg: (int64, int64), reply_to: actor_ref) -> (:no_reply, actor_ref) {
+    sequence proc[external_danger, concurrency]
+        (op: int64, arg: int64) <- msg;
+        result: int64 <- case op of {
+            1 -> clock_monotonic_ns_raw();
+            2 -> clock_system_ns_raw();
+            3 -> poll_wait_ms_raw(arg);
+            _: int64 -> 0
+        };
+        _: boolean <- cast(reply_to, (op, result) impl ActorMessage {})
+    produces pure (:no_reply, reply_to) end
+}
+
+fn start_clock_worker(reply_to: actor_ref) -> dangerous_actor_ref {
+    sequence proc[concurrency]
+        w: dangerous_actor_ref <- spawn_dangerous(reply_to, clock_worker)
+    produces pure w end
+}

@@ -1,0 +1,55 @@
+// S4: the native edge through Fifi. The foreign declarations, the worker and main are one unit,
+// as Silica's FFI placement checks require (E4041/E4042; S4 note §2). One request to the worker:
+// it reads the monotonic clock, waits 50 ms in poll, reads the clock and the wall clock, and casts
+// three raw values to the sink, which judges each inside the handler that receives it (FFI spec
+// §7.6) and prints "done" after the third. A worker answers one request only (SD-18).
+// Expected: true true true / done
+module dangerous_clock_and_poll;
+
+wrapper_meta "dangerous_exposure_source/bees/silica_bees_native_wrapper.meta";
+
+foreign c_wrapper "bees_clock_monotonic_ns"
+fn clock_monotonic_ns_raw() -> int64;
+
+foreign c_wrapper "bees_clock_system_ns"
+fn clock_system_ns_raw() -> int64;
+
+foreign c_wrapper "bees_poll_wait_ms"
+fn poll_wait_ms_raw(ms: int64) -> int64;
+
+// state counts the results seen: 0 elapsed_ns, 1 waited_ns, 2 wall_ns
+fn sink(msg: int64, state: int64) -> (:no_reply, int64) {
+    sequence proc[device_io]
+        ok: boolean <- case state of {
+            0 -> msg >= 50000000;
+            1 -> msg >= 50000000 and msg < 150000000;
+            _: int64 -> msg > 1700000000000000000
+        };
+        _: atom <- print_bool(ok);
+        _: atom <- case state == 2 of {
+            true -> { println(""); println("done"); :ok };
+            false -> { print_string(" "); :ok }
+        }
+    produces pure (:no_reply, state + 1) end
+}
+
+fn worker(msg: int64, reply_to: actor_ref) -> (:no_reply, actor_ref) {
+    sequence proc[external_danger, concurrency]
+        t0: int64 <- clock_monotonic_ns_raw();
+        waited: int64 <- poll_wait_ms_raw(msg);
+        t1: int64 <- clock_monotonic_ns_raw();
+        wall: int64 <- clock_system_ns_raw();
+        _: boolean <- cast(reply_to, t1 - t0 impl ActorMessage {});
+        _: boolean <- cast(reply_to, waited impl ActorMessage {});
+        _: boolean <- cast(reply_to, wall impl ActorMessage {})
+    produces pure (:no_reply, reply_to) end
+}
+
+fn main() -> int64 {
+    sequence proc[concurrency, device_io]
+        s: actor_ref <- spawn(0, sink);
+        w: dangerous_actor_ref <- spawn_dangerous(s, worker);
+        _: boolean <- cast(w, 50 impl ActorMessage {});
+        _: int64 <- wait_for_exit()
+    produces pure 0 end
+}

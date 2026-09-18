@@ -3,19 +3,24 @@
 BEES_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 include $(BEES_ROOT)/tools/silica.mk
 
-.PHONY: integrate record-golden build clean help
+.PHONY: integrate record-golden build clean help native
 
-integrate: check-compiler
+integrate: check-compiler native
 	@$(MAKE) -C trials integrate
 
 record-golden: check-compiler
 	@$(MAKE) -C trials record-golden
 
-build: check-compiler
+build: check-compiler native
 	@$(MAKE) -C trials build
+
+.PHONY: native
+native:
+	@$(MAKE) -C native
 
 clean:
 	@$(MAKE) -C trials clean
+	@$(MAKE) -C native clean
 
 help:
 	@echo "make integrate      build, run and diff every trial leaf against its goldens"

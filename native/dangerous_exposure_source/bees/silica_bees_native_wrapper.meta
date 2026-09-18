@@ -1,0 +1,19 @@
+link_library: "silica_bees_native"
+
+wrapper bees_clock_monotonic_ns {
+    symbol: "bees_clock_monotonic_ns"
+    result: "scalar"
+    error_domain: "dangerous_bees_native"
+}
+
+wrapper bees_clock_system_ns {
+    symbol: "bees_clock_system_ns"
+    result: "scalar"
+    error_domain: "dangerous_bees_native"
+}
+
+wrapper bees_poll_wait_ms {
+    symbol: "bees_poll_wait_ms"
+    result: "scalar"
+    error_domain: "dangerous_bees_native"
+}

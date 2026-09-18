@@ -39,9 +39,15 @@ endef
 # Run one trial executable with a wall-clock limit, capture stdout+stderr and the exit code.
 # Addresses printed by the runtime (actor_id: 0x...) vary between runs and are normalised.
 SILICA_RUN_TIMEOUT ?= 120
+# A trial whose main ends in wait_for_exit() has a NAME.wait_for_exit file holding the marker line
+# after which "exit" is fed to it (tools/run_trial.py); every other trial runs with stdin closed.
 define RUN_TRIAL
-	perl -e 'alarm shift @ARGV; exec @ARGV' $(SILICA_RUN_TIMEOUT) "$(1)" < /dev/null > "$(2)" 2>&1; rc=$$?; \
-	printf 'exit=%s\n' "$$rc" >> "$(2)"; \
+	if [ -f "$(1).wait_for_exit" ]; then \
+		"$(BEES_ROOT)/tools/run_trial.py" "$(1)" "$(2)" "$$(cat "$(1).wait_for_exit")"; \
+	else \
+		perl -e 'alarm shift @ARGV; exec @ARGV' $(SILICA_RUN_TIMEOUT) "$(1)" < /dev/null > "$(2)" 2>&1; rc=$$?; \
+		printf 'exit=%s\n' "$$rc" >> "$(2)"; \
+	fi; \
 	sed -i '' -E 's/0x[0-9a-f]{6,}/0xADDR/g' "$(2)"
 endef
 
