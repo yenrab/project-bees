@@ -1,0 +1,13 @@
+module bees_spike_atom_a;
+// Spike S2: unit A mints atoms. Its own first-appearance order is deliberately
+// different from unit B's: :zebra, :apple, :mango here.
+
+export mint_zebra/0;
+export mint_apple/0;
+export mint_mango/0;
+export mint_pair/0;
+
+fn mint_zebra() -> atom { :zebra }
+fn mint_apple() -> atom { :apple }
+fn mint_mango() -> atom { :mango }
+fn mint_pair() -> (atom, int64) { (:mango, 7) }

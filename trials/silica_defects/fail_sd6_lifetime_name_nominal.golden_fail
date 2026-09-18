@@ -1,0 +1,32 @@
+Files to compile: 
+1
+Parsing 
+fail_sd6_lifetime_name_nominal.silica...
+  Lexing...
+  Parsing...
+Compiling 
+fail_sd6_lifetime_name_nominal.silica...
+  Module checking...
+  FFI metadata...
+  FFI placement...
+  Type checking...
+❌ Compilation error: 
+TypeError error at 
+fail_sd6_lifetime_name_nominal.silica
+ line: 18
+ column: 27
+E2003
+
+type mismatch: cell
+See specification: spec:sect6
+
+<!-- SILICA-ERROR-METADATA
+errorCode: E2003
+errorType: error
+file: fail_sd6_lifetime_name_nominal.silica
+line: 18
+column: 27
+offset: 940
+specSection: sect6
+-->
+exit=1

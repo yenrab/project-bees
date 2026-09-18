@@ -1,0 +1,20 @@
+// SD-6: a function declared over region(L, normal) rejects an argument typed region(M, normal)
+// (E2003 "field has type ref?(M,normal,rec), expected ref?(L, normal, rec)"): lifetime
+// identifiers in signatures are matched by name, not treated as variables. Every BEES unit
+// therefore names the term lifetime L. Possibly by design; recorded because §12 reads as if
+// lifetimes were variables.
+fn count(root: ref(L, normal, (atom, int64, ref?(L, normal, rec)))) -> int64 {
+    sequence proc[mem(normal)]
+        node: (atom, int64, ref?(L, normal, rec)) <- read_ref(root);
+        (_: atom, v: int64, _: ref?(L, normal, rec)) <- node
+    produces pure v end
+}
+
+fn main() -> int64 {
+    sequence proc[mem(normal)]
+        M: lifetime <- fresh_lifetime();
+        r: region(M, normal) <- alloc_region(normal);
+        cell: ref(M, normal, (atom, int64, ref?(M, normal, rec))) <- alloc_rec(r, (:int, 1, :none));
+        n: int64 <- count(cell)
+    produces pure n end
+}

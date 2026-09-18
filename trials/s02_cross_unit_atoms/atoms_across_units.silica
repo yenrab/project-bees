@@ -1,0 +1,35 @@
+// Spike S2: atoms minted in unit A, classified in unit B, and compared here in a third
+// unit whose own first-appearance order is different again (:mango first).
+// Expected: 3 1 2 / true / mango / 2 7 / true true true
+use bees_spike_atom_a;
+use bees_spike_atom_b;
+
+fn main() -> int64 {
+    sequence proc[device_io]
+        m: atom <- bees_spike_atom_a@mint_mango();
+        z: atom <- bees_spike_atom_a@mint_zebra();
+        a: atom <- bees_spike_atom_a@mint_apple();
+        _: atom <- print_int64(bees_spike_atom_b@classify(z));
+        print_string(" ");
+        _: atom <- print_int64(bees_spike_atom_b@classify(a));
+        print_string(" ");
+        _: atom <- print_int64(bees_spike_atom_b@classify(m));
+        println("");
+        _: atom <- print_bool(bees_spike_atom_b@is_mango(m));
+        println("");
+        println(bees_spike_atom_b@spelling(m));
+        p: (atom, int64) <- bees_spike_atom_a@mint_pair();
+        (pa: atom, pn: int64) <- p;
+        _: atom <- print_int64(bees_spike_atom_b@classify(pa));
+        print_string(" ");
+        _: atom <- print_int64(pn);
+        println("");
+        // Comparisons in this unit against literals this unit spells itself.
+        _: atom <- print_bool(m == :mango);
+        print_string(" ");
+        _: atom <- print_bool(z == :zebra);
+        print_string(" ");
+        _: atom <- print_bool(a != :zebra);
+        println("")
+    produces pure 0 end
+}
