@@ -1,0 +1,2 @@
+[silica] fault at 0xADDR in cast_only_child_with_region_state_init+0xADDR  addr=0xADDR  actor=0xADDR  sbase=0xADDR  ssize=0xADDR
+exit=70
