@@ -10,6 +10,9 @@ Companion documents:
   each gap.
 - [inter-nodal-modes.md](inter-nodal-modes.md) — the two distribution modes: **SEMP/TRUST** (the default) and
   **standard BEAM distribution** (an explicit downgrade, and the mode for OTP interop).
+- [dependency-graph.md](dependency-graph.md) — this plan as a graph of start and close dependencies, with the
+  waves of work that may run concurrently. Generated from `gen-dependency-graph.py`; the roadmap stays
+  authoritative.
 
 All statements about Silica below were checked against the Silica repository at Apple Silicon **fixed point 1**
 (commit `8aff9cdc5`, 2026-09-13; 33,824 trials green). Where the Silica specification and the implementation
