@@ -40,7 +40,7 @@ endef
 # Addresses printed by the runtime (actor_id: 0x...) vary between runs and are normalised.
 SILICA_RUN_TIMEOUT ?= 120
 define RUN_TRIAL
-	perl -e 'alarm shift @ARGV; exec @ARGV' $(SILICA_RUN_TIMEOUT) "$(1)" > "$(2)" 2>&1; rc=$$?; \
+	perl -e 'alarm shift @ARGV; exec @ARGV' $(SILICA_RUN_TIMEOUT) "$(1)" < /dev/null > "$(2)" 2>&1; rc=$$?; \
 	printf 'exit=%s\n' "$$rc" >> "$(2)"; \
 	sed -i '' -E 's/0x[0-9a-f]{6,}/0xADDR/g' "$(2)"
 endef
