@@ -9,38 +9,25 @@
 // Expected: 3 258 3
 use bees_term;
 
-// <<3, 1, 2, 9, 9, 9>> as a term: the byte list, then the binary cell
-fn byte_list(h: { r: region(L, normal), c: ref?(L, normal, rec) }, i: int64) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
-    sequence
-        b: int64 <- case i of { 0 -> 3; 1 -> 1; 2 -> 2; _: int64 -> 9 };
-        rest: { r: region(L, normal), c: ref?(L, normal, rec) } <- case i == 6 of {
-            true -> bees_term@mk_nil(h);
-            false -> byte_list(h, i + 1)
-        };
-        cell: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_int(rest, b);
-        out: { r: region(L, normal), c: ref?(L, normal, rec) } <- case i == 6 of { true -> rest; false -> bees_term@mk_cons(cell, cell.c, rest.c) }
-    produces pure out end
-}
-fn mk_binary(h: { r: region(L, normal), c: ref?(L, normal, rec) }, n: int64, bs: ref?(L, normal, rec)) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
-    sequence proc[mem(normal), concurrency]
-        me: actor_ref <- self();
-        c: ref(L, normal, (int64, int64, float64, atom, actor_ref, ref?(L, normal, rec), ref?(L, normal, rec))) <- alloc_rec(h.r, (7, n, 0.0, :ok, me, bs, :none))
-    produces pure { r: h.r, c: bees_term@wrap_ref(c) } end
+// <<3, 1, 2, 9, 9, 9>> as a byte list, built from the end
+fn byte_list(h: { r: region(L, normal) }, i: int64) -> ref?(L, normal, rec) {
+    case i == 6 of {
+        true -> bees_term@mk_nil(h);
+        false -> bees_term@mk_cons(h, bees_term@mk_int(h, case i of { 0 -> 3; 1 -> 1; 2 -> 2; _: int64 -> 9 }), byte_list(h, i + 1))
+    }
 }
 
 // byte i of a binary
 fn byte_at(bin: ref?(L, normal, rec), i: int64) -> int64 {
-    bl: { c: ref?(L, normal, rec) } <- bees_term@hd_of(bin);
-    b: { c: ref?(L, normal, rec) } <- bees_term@nth(bl.c, i);
-    bees_term@int_of(b.c)
+    bees_term@int_of(bees_term@nth(bees_term@hd_of(bin), i))
 }
 
 fn main() -> int64 {
     sequence proc[mem(normal), device_io]
         L: lifetime <- fresh_lifetime();
         r: region(L, normal) <- alloc_region(normal);
-        bl: { r: region(L, normal), c: ref?(L, normal, rec) } <- byte_list(bees_term@heap_of(r), 0);
-        bin: { r: region(L, normal), c: ref?(L, normal, rec) } <- mk_binary(bl, 6, bl.c);
+        h: { r: region(L, normal) } <- { r: r };
+        bin: { c: ref?(L, normal, rec) } <- { c: bees_term@mk_binary(h, 6, byte_list(h, 0)) };
         size: int64 <- bees_term@int_of(bin.c);
         // the match: Len:8 at byte 0, Tag:16/big at bytes 1-2, Rest/binary from byte 3
         ok: boolean <- bees_term@tag(bin.c) == 7 and size >= 3;

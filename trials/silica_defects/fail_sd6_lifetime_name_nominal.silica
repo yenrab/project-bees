@@ -14,7 +14,7 @@ fn main() -> int64 {
     sequence proc[mem(normal)]
         M: lifetime <- fresh_lifetime();
         r: region(M, normal) <- alloc_region(normal);
-        cell: ref(M, normal, (atom, int64, ref?(M, normal, rec))) <- alloc_rec(r, (:int, 1, :none));
+        cell: ref(M, normal, (atom, int64, ref?(M, normal, rec))) <- alloc_rec(r, (:ok, 1, :none));
         n: int64 <- count(cell)
     produces pure n end
 }

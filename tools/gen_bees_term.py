@@ -17,7 +17,7 @@ import os
 T = "(int64, int64, float64, atom, actor_ref, ref?(L, normal, rec), ref?(L, normal, rec))"
 R = f"ref(L, normal, {T})"
 O = "ref?(L, normal, rec)"
-H = f"{{ r: region(L, normal), c: {O} }}"
+H = "{ r: region(L, normal) }"
 C = f"{{ c: {O} }}"
 
 BEES_TERM = """module bees_term;
@@ -25,14 +25,20 @@ BEES_TERM = """module bees_term;
 //
 // bees_term v0 (spike S9; contract item 1 draft). A term is a cell in a region:
 //   (tag, n, f, a, p, h, t)
-//   tag  0 nil  1 int(n)  2 float(f)  3 mk_atom(a)  4 pid(p)  5 mk_cons(h=head, t=tail)
+//   tag  0 nil  1 int(n)  2 float(f)  3 atom(a)  4 pid(p)  5 cons(h=head, t=tail)
 //        6 tuple(n=arity, h=element list)  7 binary(n=byte count, h=list of int cells 0..255)
-//        8 fun(n=module index, h=(fn index, env list) as a cons)
+//        8 fun(n=module index, h=cons(fn index, env list))
 // Every atom in a term comes from bees_atoms (D30); this unit writes none.
-// Constructors take and return the heap record { r, c } (SD-20: a (region, ref) tuple return
-// crashes on actor threads) and put the new cell in c. Every region that holds terms is
-// region(L, normal) (SD-6). Optional references are written ref?(L, normal, rec) (SD-4) and are
-// bound only through records (SD-5).
+//
+// Shapes forced by the fixed point (see the S9 and S13 notes):
+//  - the heap is the record { r: region(L, normal) }, passed IN to every constructor; a process
+//    keeps it in its state as a field h. A message is { r: region(L, normal), c: ref?(L, normal, rec) },
+//    a term in its own region, moved by the cast;
+//  - every constructor and accessor returns ONE reference, ref?(L, normal, rec): an aggregate
+//    (record or tuple) return leaks ~32 bytes of stack per call for the life of the actor
+//    (SD-21), a plain ref return fails E2100, and a (region, ref) tuple crashes (SD-20);
+//  - a ref? cannot annotate a binding (SD-5): results are used as arguments, in `case`, or held
+//    in a record field; every region that holds terms is region(L, normal) (SD-6).
 
 export mk_nil/1;
 export mk_int/2;
@@ -41,6 +47,8 @@ export mk_atom/2;
 export mk_pid/2;
 export mk_cons/3;
 export mk_tuple/3;
+export mk_binary/3;
+export mk_fun/3;
 export tag/1;
 export int_of/1;
 export float_of/1;
@@ -54,53 +62,67 @@ export nth/2;
 export copy/2;
 export eq/2;
 export is_none/1;
-export wrap/1;
-export heap_of/1;
-export wrap_ref/1;
+export is_list/1;
 
 fn some(c: $R) -> $O { c }
-// The public widening of a cell reference to an optional one (SD-5).
-fn wrap_ref(c: $R) -> $O { c }
-fn wrap(c: $O) -> $C { { c: c } }
-// The heap record for a region with no cell yet (a record literal with :none needs this return type).
-fn heap_of(r: region(L, normal)) -> $H { { r: r, c: :none } }
 fn is_none(c: $O) -> boolean { case c of { :none -> true; _: $R -> false } }
+fn is_list(c: $O) -> boolean { tag(c) == 5 }
 
-fn mk_nil(h: $H) -> $H {
+fn mk_nil(h: $H) -> $O {
     sequence proc[mem(normal), concurrency]
-        c: $R <- alloc_rec(h.r, (0, 0, 0.0, :ok, self(), :none, :none))
-    produces pure { r: h.r, c: some(c) } end
+        me: actor_ref <- self();
+        c: $R <- alloc_rec(h.r, (0, 0, 0.0, :ok, me, :none, :none))
+    produces pure some(c) end
 }
-fn mk_int(h: $H, n: int64) -> $H {
+fn mk_int(h: $H, n: int64) -> $O {
     sequence proc[mem(normal), concurrency]
-        c: $R <- alloc_rec(h.r, (1, n, 0.0, :ok, self(), :none, :none))
-    produces pure { r: h.r, c: some(c) } end
+        me: actor_ref <- self();
+        c: $R <- alloc_rec(h.r, (1, n, 0.0, :ok, me, :none, :none))
+    produces pure some(c) end
 }
-fn mk_float(h: $H, f: float64) -> $H {
+fn mk_float(h: $H, f: float64) -> $O {
     sequence proc[mem(normal), concurrency]
-        c: $R <- alloc_rec(h.r, (2, 0, f, :ok, self(), :none, :none))
-    produces pure { r: h.r, c: some(c) } end
+        me: actor_ref <- self();
+        c: $R <- alloc_rec(h.r, (2, 0, f, :ok, me, :none, :none))
+    produces pure some(c) end
 }
-fn mk_atom(h: $H, a: atom) -> $H {
+fn mk_atom(h: $H, a: atom) -> $O {
     sequence proc[mem(normal), concurrency]
-        c: $R <- alloc_rec(h.r, (3, 0, 0.0, a, self(), :none, :none))
-    produces pure { r: h.r, c: some(c) } end
+        me: actor_ref <- self();
+        c: $R <- alloc_rec(h.r, (3, 0, 0.0, a, me, :none, :none))
+    produces pure some(c) end
 }
-fn mk_pid(h: $H, p: actor_ref) -> $H {
+fn mk_pid(h: $H, p: actor_ref) -> $O {
     sequence proc[mem(normal)]
         c: $R <- alloc_rec(h.r, (4, 0, 0.0, :ok, p, :none, :none))
-    produces pure { r: h.r, c: some(c) } end
+    produces pure some(c) end
 }
-fn mk_cons(h: $H, hd: $O, tl: $O) -> $H {
+fn mk_cons(h: $H, hd: $O, tl: $O) -> $O {
     sequence proc[mem(normal), concurrency]
-        c: $R <- alloc_rec(h.r, (5, 0, 0.0, :ok, self(), hd, tl))
-    produces pure { r: h.r, c: some(c) } end
+        me: actor_ref <- self();
+        c: $R <- alloc_rec(h.r, (5, 0, 0.0, :ok, me, hd, tl))
+    produces pure some(c) end
 }
-// A tuple of arity n over a list of its elements (built with cons, nil-terminated).
-fn mk_tuple(h: $H, n: int64, elements: $O) -> $H {
+// A tuple of arity n over the list of its elements.
+fn mk_tuple(h: $H, n: int64, elements: $O) -> $O {
     sequence proc[mem(normal), concurrency]
-        c: $R <- alloc_rec(h.r, (6, n, 0.0, :ok, self(), elements, :none))
-    produces pure { r: h.r, c: some(c) } end
+        me: actor_ref <- self();
+        c: $R <- alloc_rec(h.r, (6, n, 0.0, :ok, me, elements, :none))
+    produces pure some(c) end
+}
+// A binary of n bytes over a list of int cells 0..255.
+fn mk_binary(h: $H, n: int64, bs: $O) -> $O {
+    sequence proc[mem(normal), concurrency]
+        me: actor_ref <- self();
+        c: $R <- alloc_rec(h.r, (7, n, 0.0, :ok, me, bs, :none))
+    produces pure some(c) end
+}
+// A fun: module index and cons(fn index, env list).
+fn mk_fun(h: $H, module_index: int64, body: $O) -> $O {
+    sequence proc[mem(normal), concurrency]
+        me: actor_ref <- self();
+        c: $R <- alloc_rec(h.r, (8, module_index, 0.0, :ok, me, body, :none))
+    produces pure some(c) end
 }
 
 fn read(c: $R) -> $T {
@@ -127,8 +149,9 @@ fn int_of(c: $O) -> int64 {
         }
     }
 }
-// A float64-returning function must not destructure the cell (SD-14 class: the emitter uses D0
-// as the base register), so the slot is fetched through a record.
+// A float64-returning function must not destructure the cell (SD-14), so the slot comes through
+// a record; that record return leaks ~32 bytes of stack per call (SD-21). A1 decides whether
+// floats are held as their IEEE bytes instead.
 fn float_slot(x: $R) -> { f: float64 } {
     sequence proc[mem(normal)]
         node: $T <- read_ref(x);
@@ -136,13 +159,13 @@ fn float_slot(x: $R) -> { f: float64 } {
     produces pure { f: f } end
 }
 fn fzero() -> float64 { 0.0 }
+fn fget(s: { f: float64 }) -> float64 { s.f }
 fn float_of(c: $O) -> float64 {
     case c of {
         :none -> fzero();
         x: $R -> fget(float_slot(x))
     }
 }
-fn fget(s: { f: float64 }) -> float64 { s.f }
 fn atom_of(c: $O) -> atom {
     case c of {
         :none -> :unknown;
@@ -164,21 +187,21 @@ fn pid_of(c: $O) -> actor_ref {
         }
     produces pure p end
 }
-fn hd_of(c: $O) -> $C {
+fn hd_of(c: $O) -> $O {
     case c of {
-        :none -> { c: :none };
+        :none -> :none;
         x: $R -> {
             (_: int64, _: int64, _: float64, _: atom, _: actor_ref, hd: $O, _: $O) <- read(x);
-            { c: hd }
+            hd
         }
     }
 }
-fn tl_of(c: $O) -> $C {
+fn tl_of(c: $O) -> $O {
     case c of {
-        :none -> { c: :none };
+        :none -> :none;
         x: $R -> {
             (_: int64, _: int64, _: float64, _: atom, _: actor_ref, _: $O, tl: $O) <- read(x);
-            { c: tl }
+            tl
         }
     }
 }
@@ -187,43 +210,32 @@ fn arity(c: $O) -> int64 { int_of(c) }
 // Length of a cons list (nil-terminated); a non-list ends the count.
 fn list_len(c: $O) -> int64 {
     case tag(c) == 5 of {
-        true -> {
-            t: $C <- tl_of(c);
-            1 + list_len(t.c)
-        };
+        true -> 1 + list_len(tl_of(c));
         false -> 0
     }
 }
 // The i-th element (0-based) of a cons list, or none.
-fn nth(c: $O, i: int64) -> $C {
+fn nth(c: $O, i: int64) -> $O {
     case tag(c) == 5 of {
         true -> case i == 0 of {
             true -> hd_of(c);
-            false -> {
-                t: $C <- tl_of(c);
-                nth(t.c, i - 1)
-            }
+            false -> nth(tl_of(c), i - 1)
         };
-        false -> { c: :none }
+        false -> :none
     }
 }
 
 // Deep copy of a term from any region into the heap h (evacuation, roadmap §4.2).
-fn copy(h: $H, c: $O) -> $H {
+fn copy(h: $H, c: $O) -> $O {
     case c of {
-        :none -> { r: h.r, c: :none };
+        :none -> :none;
         x: $R -> {
             (tg: int64, n: int64, f: float64, a: atom, p: actor_ref, hd: $O, tl: $O) <- read(x);
             case tg of {
-                5 -> {
-                    h1: $H <- copy(h, hd);
-                    h2: $H <- copy(h1, tl);
-                    mk_cons(h2, h1.c, h2.c)
-                };
-                6 -> {
-                    h1: $H <- copy(h, hd);
-                    mk_tuple(h1, n, h1.c)
-                };
+                5 -> mk_cons(h, copy(h, hd), copy(h, tl));
+                6 -> mk_tuple(h, n, copy(h, hd));
+                7 -> mk_binary(h, n, copy(h, hd));
+                8 -> mk_fun(h, n, copy(h, hd));
                 2 -> mk_float(h, f);
                 3 -> mk_atom(h, a);
                 4 -> mk_pid(h, p);
@@ -244,18 +256,9 @@ fn eq(a: $O, b: $O) -> boolean {
             2 -> feq(float_of(a), float_of(b));
             3 -> atom_of(a) == atom_of(b);
             4 -> same_pid(pid_of(a), pid_of(b));
-            5 -> {
-                ha: $C <- hd_of(a);
-                hb: $C <- hd_of(b);
-                ta: $C <- tl_of(a);
-                tb: $C <- tl_of(b);
-                eq(ha.c, hb.c) and eq(ta.c, tb.c)
-            };
-            6 -> {
-                ha: $C <- hd_of(a);
-                hb: $C <- hd_of(b);
-                arity(a) == arity(b) and eq(ha.c, hb.c)
-            };
+            5 -> eq(hd_of(a), hd_of(b)) and eq(tl_of(a), tl_of(b));
+            6 -> arity(a) == arity(b) and eq(hd_of(a), hd_of(b));
+            7 -> arity(a) == arity(b) and eq(hd_of(a), hd_of(b));
             _: int64 -> false
         }
     }
@@ -270,50 +273,46 @@ fn same_pid(x: actor_ref, y: actor_ref) -> boolean { false }
 BEES_RECV = """module bees_recv;
 // GENERATED by tools/gen_bees_term.py; edit the template there.
 //
-// The save queue for reshaped `receive` (D1, spike S9). A process that is waiting in a receive
-// keeps the messages that did not match in a cons list in its own heap, oldest first. When it
-// enters a receive it first takes from the queue; a message that arrives and does not match is
-// appended. Matching is a predicate the compiler emits for the receive's patterns.
+// The save queue for reshaped `receive` (D1, spike S9). A process waiting in a receive keeps the
+// messages that did not match in a cons list in its own heap, oldest first. Entering a receive
+// first selects from the queue; a message that arrives and matches no clause is appended.
+// Matching is a predicate the compiler emits for the receive's clauses. Both operations return
+// one reference (SD-21): select returns the queue with the first matching message moved to its
+// head, so the caller checks the predicate on hd_of(q) and takes tl_of(q) as the rest.
 
 use bees_term;
 
 export append/3;
-export take/3;
+export select/3;
 
-// Append the term m (already copied into the heap) at the end of the queue q.
-fn append(h: $H, q: $O, m: $O) -> $H {
+// Append the term m (already in the heap) at the end of the queue q.
+fn append(h: $H, q: $O, m: $O) -> $O {
     case bees_term@tag(q) == 5 of {
-        false -> {
-            h1: $H <- bees_term@mk_nil(h);
-            bees_term@mk_cons(h1, m, h1.c)
-        };
-        true -> {
-            hd: $C <- bees_term@hd_of(q);
-            tl: $C <- bees_term@tl_of(q);
-            h1: $H <- append(h, tl.c, m);
-            bees_term@mk_cons(h1, hd.c, h1.c)
-        }
+        false -> bees_term@mk_cons(h, m, bees_term@mk_nil(h));
+        true -> bees_term@mk_cons(h, bees_term@hd_of(q), append(h, bees_term@tl_of(q), m))
     }
 }
 
-// Take the first queued message satisfying the predicate. Returns the heap, the queue without
-// that message, and the message (or none). found is false when nothing matched.
-fn take(h: $H, q: $O, matches: fn($O) -> boolean) -> { r: region(L, normal), rest: $O, taken: $O, found: boolean } {
+// The queue with the first message satisfying the predicate moved to the front; unchanged when
+// none matches. The caller tests matches(hd_of(result)).
+fn select(h: $H, q: $O, matches: fn($O) -> boolean) -> $O {
     case bees_term@tag(q) == 5 of {
-        false -> { r: h.r, rest: q, taken: :none, found: false };
-        true -> {
-            hd: $C <- bees_term@hd_of(q);
-            tl: $C <- bees_term@tl_of(q);
-            case matches(hd.c) of {
-                true -> { r: h.r, rest: tl.c, taken: hd.c, found: true };
-                false -> {
-                    inner: { r: region(L, normal), rest: $O, taken: $O, found: boolean } <- take(h, tl.c, matches);
-                    h2: $H <- bees_term@mk_cons(bees_term@heap_of(inner.r), hd.c, inner.rest);
-                    { r: h2.r, rest: h2.c, taken: inner.taken, found: inner.found }
-                }
-            }
+        false -> q;
+        true -> case matches(bees_term@hd_of(q)) of {
+            true -> q;
+            false -> reorder(h, q, select(h, bees_term@tl_of(q), matches), matches)
         }
     }
+}
+// rest is the tail with its match (if any) at the front: put that match ahead of q's head.
+fn reorder(h: $H, q: $O, rest: $O, matches: fn($O) -> boolean) -> $O {
+    case has_match(rest, matches) of {
+        true -> bees_term@mk_cons(h, bees_term@hd_of(rest), bees_term@mk_cons(h, bees_term@hd_of(q), bees_term@tl_of(rest)));
+        false -> q
+    }
+}
+fn has_match(q: $O, matches: fn($O) -> boolean) -> boolean {
+    case bees_term@tag(q) == 5 of { false -> false; true -> matches(bees_term@hd_of(q)) }
 }
 """
 

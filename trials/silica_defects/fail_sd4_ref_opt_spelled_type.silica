@@ -6,7 +6,7 @@
 // spelled form. Workaround: write every optional recursive reference as ref?(L, normal, rec).
 fn beh(msg: int64, state: { r: region(L, normal), root: ref?(L, normal, (atom, int64, ref?(L, normal, rec))) }) -> (:no_reply, { r: region(L, normal), root: ref?(L, normal, (atom, int64, ref?(L, normal, rec))) }) {
     sequence proc[mem(normal)]
-        cell: ref(L, normal, (atom, int64, ref?(L, normal, rec))) <- alloc_rec(state.r, (:int, msg, state.root))
+        cell: ref(L, normal, (atom, int64, ref?(L, normal, rec))) <- alloc_rec(state.r, (:ok, msg, state.root))
     produces pure (:no_reply, { r: state.r, root: :none }) end
 }
 

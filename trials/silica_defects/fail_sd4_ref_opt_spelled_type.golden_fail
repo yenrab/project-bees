@@ -1,7 +1,15 @@
 Files to compile: 
-1
+3
 Parsing 
 fail_sd4_ref_opt_spelled_type.silica...
+  Lexing...
+  Parsing...
+Parsing 
+lib/bees_atoms.silica...
+  Lexing...
+  Parsing...
+Parsing 
+lib/bees_term.silica...
   Lexing...
   Parsing...
 Compiling 
@@ -14,7 +22,7 @@ fail_sd4_ref_opt_spelled_type.silica...
 TypeError error at 
 fail_sd4_ref_opt_spelled_type.silica
  line: 9
- column: 106
+ column: 105
 E2003
 
 field has type ref?(L,normal,(atom,int64,ref?(L,normal,rec))), expected ref?(L, normal, rec)
@@ -25,8 +33,8 @@ errorCode: E2003
 errorType: error
 file: fail_sd4_ref_opt_spelled_type.silica
 line: 9
-column: 106
-offset: 873
+column: 105
+offset: 872
 specSection: sect3
 -->
 exit=1

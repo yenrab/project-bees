@@ -31,8 +31,8 @@ fn build_message(a: int64, b: int64) -> { r: region(L, normal), root: ref?(L, no
     sequence proc[mem(normal)]
         L: lifetime <- fresh_lifetime();
         r: region(L, normal) <- alloc_region(normal);
-        n2: ref(L, normal, (atom, int64, ref?(L, normal, rec))) <- alloc_rec(r, (:int, b, :none));
-        n1: ref(L, normal, (atom, int64, ref?(L, normal, rec))) <- alloc_rec(r, (:int, a, n2))
+        n2: ref(L, normal, (atom, int64, ref?(L, normal, rec))) <- alloc_rec(r, (:ok, b, :none));
+        n1: ref(L, normal, (atom, int64, ref?(L, normal, rec))) <- alloc_rec(r, (:ok, a, n2))
     produces pure { r: r, root: some_term(n1) } end
 }
 
