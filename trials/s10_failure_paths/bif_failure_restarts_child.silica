@@ -1,0 +1,59 @@
+// S10: a "BIF failure" (integer division by zero, the analogue of badarith) inside a supervised
+// process ends the actor; the supervisor restarts the permanent child with its initial state,
+// and the crash report shows reason_tag 1. A case-clause miss (the analogue of case_clause)
+// ends the actor with reason_tag 2. There are no explicit reason atoms yet (S-9).
+// Expected: 100 (first call), then the death, then 3 (fresh state after restart), then 2 (case
+// clause death), then 7.
+use Supervisor;
+
+impl S10Sup for Supervisor;
+
+fn worker(msg: int64, state: int64) -> (:reply, int64, int64) {
+    v: int64 <- case msg of {
+        99 -> case state of { 1 -> 1 };
+        _: int64 -> state / msg
+    };
+    (:reply, v, state + 1)
+}
+
+fn init(initial_state: int64) -> (
+    { strategy: :one_for_one | :one_for_all | :rest_for_one, allowed_restart_count: int64, restarts_time_frame: int64 },
+    List[{ id: atom, agent_type: :worker | :supervisor, initial_state: int64, behavior: fn(msg: int64, state: int64) -> (:reply, int64, int64), restart: :permanent | :temporary | :transient, shutdown: int64, flavor: :plain | :dangerous }, mem(normal)]
+) {
+    sequence proc[mem(normal)]
+        flags: { strategy: :one_for_one | :one_for_all | :rest_for_one, allowed_restart_count: int64, restarts_time_frame: int64 } <- { strategy: :one_for_one, allowed_restart_count: 5, restarts_time_frame: 10 };
+        children: List[{ id: atom, agent_type: :worker | :supervisor, initial_state: int64, behavior: fn(msg: int64, state: int64) -> (:reply, int64, int64), restart: :permanent | :temporary | :transient, shutdown: int64, flavor: :plain | :dangerous }, mem(normal)] <- [
+            { id: :s10_worker, agent_type: :worker, initial_state: initial_state, behavior: worker, restart: :permanent, shutdown: 0, flavor: :plain }
+        ]
+    produces pure (flags, children) end
+}
+
+fn child_of(sup: supervisor_ref) -> actor_ref {
+    sequence
+        got: { tag: :child_started | :ok | :children | :count | :child_info | :error, child: actor_ref, status: atom, children: List[{ id: atom, agent_type: :worker | :supervisor, child: actor_ref, restart: :permanent | :temporary | :transient }, mem(normal)], count: int64, child_info: { id: atom, agent_type: :worker | :supervisor, child: actor_ref, restart: :permanent | :temporary | :transient }, error: atom } <- call_supervisor(sup, { op: :get_child, id: :s10_worker } impl SupervisorMessage {})
+    produces pure got.child end
+}
+
+fn main() -> int64 {
+    sequence proc[concurrency, device_io]
+        sup: supervisor_ref <- spawn_registered_supervisor(S10Sup, 100, :s10_sup);
+        c1: actor_ref <- child_of(sup);
+        v1: int64 <- call(c1, 1 impl ActorMessage {});
+        _: atom <- print_int64(v1);
+        println("");
+        dead: int64 <- call(c1, 0 impl ActorMessage {});
+        _: atom <- print_int64(dead);
+        println("");
+        c2: actor_ref <- child_of(sup);
+        v2: int64 <- call(c2, 33 impl ActorMessage {});
+        _: atom <- print_int64(v2);
+        println("");
+        dead2: int64 <- call(c2, 99 impl ActorMessage {});
+        _: atom <- print_int64(dead2);
+        println("");
+        c3: actor_ref <- child_of(sup);
+        v3: int64 <- call(c3, 14 impl ActorMessage {});
+        _: atom <- print_int64(v3);
+        println("")
+    produces pure 0 end
+}
