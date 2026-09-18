@@ -1,0 +1,737 @@
+// S5: IEEE 754 float64 <-> 8 bytes (shown most significant first) with no bit-cast and no
+// int/float conversion: exponent and mantissa by int64 arithmetic on the bytes, the mantissa as a
+// float by per-bit powers of two, scaling by powers of two built from ten literals (all exact).
+// Expected: the seven lines match Python's struct.pack('>d', v) and every decode compares equal.
+// Written in the shapes the FP1 emitter compiles correctly (SD-14): float functions are single
+// expressions, float literals in case arms are calls to nullary functions, a float parameter is
+// never used again after a call, and ints and floats meet only through calls.
+// Cost: decode ~1.4 us; encode ~180 us with this descending exponent search (a binary search
+// over the ten powers would bring it near the decode cost).
+fn ipow2(i: int64) -> int64 {
+    case i of { 0 -> 1; 1 -> 2; 2 -> 4; 3 -> 8; 4 -> 16; 5 -> 32; 6 -> 64; _: int64 -> 128 }
+}
+// bits i..0 of n (0 <= n < 256) as a float, adding 2^i for each set bit (no literal float arms)
+fn bits_f(n: int64, i: int64) -> float64 {
+    case i < 0 of {
+        true -> zero();
+        false -> case (n / ipow2(i)) % 2 == 1 of {
+            true -> pow2(i, 0, one()) + bits_f(n, i - 1);
+            false -> bits_f(n, i - 1)
+        }
+    }
+}
+fn u8_to_f64(b: uint8) -> float64 { bits_f(u8_to_i64(b), 7) }
+fn u8_to_i64(b: uint8) -> int64 {
+    case b of {
+        0 -> 0;
+        1 -> 1;
+        2 -> 2;
+        3 -> 3;
+        4 -> 4;
+        5 -> 5;
+        6 -> 6;
+        7 -> 7;
+        8 -> 8;
+        9 -> 9;
+        10 -> 10;
+        11 -> 11;
+        12 -> 12;
+        13 -> 13;
+        14 -> 14;
+        15 -> 15;
+        16 -> 16;
+        17 -> 17;
+        18 -> 18;
+        19 -> 19;
+        20 -> 20;
+        21 -> 21;
+        22 -> 22;
+        23 -> 23;
+        24 -> 24;
+        25 -> 25;
+        26 -> 26;
+        27 -> 27;
+        28 -> 28;
+        29 -> 29;
+        30 -> 30;
+        31 -> 31;
+        32 -> 32;
+        33 -> 33;
+        34 -> 34;
+        35 -> 35;
+        36 -> 36;
+        37 -> 37;
+        38 -> 38;
+        39 -> 39;
+        40 -> 40;
+        41 -> 41;
+        42 -> 42;
+        43 -> 43;
+        44 -> 44;
+        45 -> 45;
+        46 -> 46;
+        47 -> 47;
+        48 -> 48;
+        49 -> 49;
+        50 -> 50;
+        51 -> 51;
+        52 -> 52;
+        53 -> 53;
+        54 -> 54;
+        55 -> 55;
+        56 -> 56;
+        57 -> 57;
+        58 -> 58;
+        59 -> 59;
+        60 -> 60;
+        61 -> 61;
+        62 -> 62;
+        63 -> 63;
+        64 -> 64;
+        65 -> 65;
+        66 -> 66;
+        67 -> 67;
+        68 -> 68;
+        69 -> 69;
+        70 -> 70;
+        71 -> 71;
+        72 -> 72;
+        73 -> 73;
+        74 -> 74;
+        75 -> 75;
+        76 -> 76;
+        77 -> 77;
+        78 -> 78;
+        79 -> 79;
+        80 -> 80;
+        81 -> 81;
+        82 -> 82;
+        83 -> 83;
+        84 -> 84;
+        85 -> 85;
+        86 -> 86;
+        87 -> 87;
+        88 -> 88;
+        89 -> 89;
+        90 -> 90;
+        91 -> 91;
+        92 -> 92;
+        93 -> 93;
+        94 -> 94;
+        95 -> 95;
+        96 -> 96;
+        97 -> 97;
+        98 -> 98;
+        99 -> 99;
+        100 -> 100;
+        101 -> 101;
+        102 -> 102;
+        103 -> 103;
+        104 -> 104;
+        105 -> 105;
+        106 -> 106;
+        107 -> 107;
+        108 -> 108;
+        109 -> 109;
+        110 -> 110;
+        111 -> 111;
+        112 -> 112;
+        113 -> 113;
+        114 -> 114;
+        115 -> 115;
+        116 -> 116;
+        117 -> 117;
+        118 -> 118;
+        119 -> 119;
+        120 -> 120;
+        121 -> 121;
+        122 -> 122;
+        123 -> 123;
+        124 -> 124;
+        125 -> 125;
+        126 -> 126;
+        127 -> 127;
+        128 -> 128;
+        129 -> 129;
+        130 -> 130;
+        131 -> 131;
+        132 -> 132;
+        133 -> 133;
+        134 -> 134;
+        135 -> 135;
+        136 -> 136;
+        137 -> 137;
+        138 -> 138;
+        139 -> 139;
+        140 -> 140;
+        141 -> 141;
+        142 -> 142;
+        143 -> 143;
+        144 -> 144;
+        145 -> 145;
+        146 -> 146;
+        147 -> 147;
+        148 -> 148;
+        149 -> 149;
+        150 -> 150;
+        151 -> 151;
+        152 -> 152;
+        153 -> 153;
+        154 -> 154;
+        155 -> 155;
+        156 -> 156;
+        157 -> 157;
+        158 -> 158;
+        159 -> 159;
+        160 -> 160;
+        161 -> 161;
+        162 -> 162;
+        163 -> 163;
+        164 -> 164;
+        165 -> 165;
+        166 -> 166;
+        167 -> 167;
+        168 -> 168;
+        169 -> 169;
+        170 -> 170;
+        171 -> 171;
+        172 -> 172;
+        173 -> 173;
+        174 -> 174;
+        175 -> 175;
+        176 -> 176;
+        177 -> 177;
+        178 -> 178;
+        179 -> 179;
+        180 -> 180;
+        181 -> 181;
+        182 -> 182;
+        183 -> 183;
+        184 -> 184;
+        185 -> 185;
+        186 -> 186;
+        187 -> 187;
+        188 -> 188;
+        189 -> 189;
+        190 -> 190;
+        191 -> 191;
+        192 -> 192;
+        193 -> 193;
+        194 -> 194;
+        195 -> 195;
+        196 -> 196;
+        197 -> 197;
+        198 -> 198;
+        199 -> 199;
+        200 -> 200;
+        201 -> 201;
+        202 -> 202;
+        203 -> 203;
+        204 -> 204;
+        205 -> 205;
+        206 -> 206;
+        207 -> 207;
+        208 -> 208;
+        209 -> 209;
+        210 -> 210;
+        211 -> 211;
+        212 -> 212;
+        213 -> 213;
+        214 -> 214;
+        215 -> 215;
+        216 -> 216;
+        217 -> 217;
+        218 -> 218;
+        219 -> 219;
+        220 -> 220;
+        221 -> 221;
+        222 -> 222;
+        223 -> 223;
+        224 -> 224;
+        225 -> 225;
+        226 -> 226;
+        227 -> 227;
+        228 -> 228;
+        229 -> 229;
+        230 -> 230;
+        231 -> 231;
+        232 -> 232;
+        233 -> 233;
+        234 -> 234;
+        235 -> 235;
+        236 -> 236;
+        237 -> 237;
+        238 -> 238;
+        239 -> 239;
+        240 -> 240;
+        241 -> 241;
+        242 -> 242;
+        243 -> 243;
+        244 -> 244;
+        245 -> 245;
+        246 -> 246;
+        247 -> 247;
+        248 -> 248;
+        249 -> 249;
+        250 -> 250;
+        251 -> 251;
+        252 -> 252;
+        253 -> 253;
+        254 -> 254;
+        _: uint8 -> 255
+    }
+}
+fn low_byte(n: int64) -> uint8 {
+    case n % 256 of {
+        0 -> 0;
+        1 -> 1;
+        2 -> 2;
+        3 -> 3;
+        4 -> 4;
+        5 -> 5;
+        6 -> 6;
+        7 -> 7;
+        8 -> 8;
+        9 -> 9;
+        10 -> 10;
+        11 -> 11;
+        12 -> 12;
+        13 -> 13;
+        14 -> 14;
+        15 -> 15;
+        16 -> 16;
+        17 -> 17;
+        18 -> 18;
+        19 -> 19;
+        20 -> 20;
+        21 -> 21;
+        22 -> 22;
+        23 -> 23;
+        24 -> 24;
+        25 -> 25;
+        26 -> 26;
+        27 -> 27;
+        28 -> 28;
+        29 -> 29;
+        30 -> 30;
+        31 -> 31;
+        32 -> 32;
+        33 -> 33;
+        34 -> 34;
+        35 -> 35;
+        36 -> 36;
+        37 -> 37;
+        38 -> 38;
+        39 -> 39;
+        40 -> 40;
+        41 -> 41;
+        42 -> 42;
+        43 -> 43;
+        44 -> 44;
+        45 -> 45;
+        46 -> 46;
+        47 -> 47;
+        48 -> 48;
+        49 -> 49;
+        50 -> 50;
+        51 -> 51;
+        52 -> 52;
+        53 -> 53;
+        54 -> 54;
+        55 -> 55;
+        56 -> 56;
+        57 -> 57;
+        58 -> 58;
+        59 -> 59;
+        60 -> 60;
+        61 -> 61;
+        62 -> 62;
+        63 -> 63;
+        64 -> 64;
+        65 -> 65;
+        66 -> 66;
+        67 -> 67;
+        68 -> 68;
+        69 -> 69;
+        70 -> 70;
+        71 -> 71;
+        72 -> 72;
+        73 -> 73;
+        74 -> 74;
+        75 -> 75;
+        76 -> 76;
+        77 -> 77;
+        78 -> 78;
+        79 -> 79;
+        80 -> 80;
+        81 -> 81;
+        82 -> 82;
+        83 -> 83;
+        84 -> 84;
+        85 -> 85;
+        86 -> 86;
+        87 -> 87;
+        88 -> 88;
+        89 -> 89;
+        90 -> 90;
+        91 -> 91;
+        92 -> 92;
+        93 -> 93;
+        94 -> 94;
+        95 -> 95;
+        96 -> 96;
+        97 -> 97;
+        98 -> 98;
+        99 -> 99;
+        100 -> 100;
+        101 -> 101;
+        102 -> 102;
+        103 -> 103;
+        104 -> 104;
+        105 -> 105;
+        106 -> 106;
+        107 -> 107;
+        108 -> 108;
+        109 -> 109;
+        110 -> 110;
+        111 -> 111;
+        112 -> 112;
+        113 -> 113;
+        114 -> 114;
+        115 -> 115;
+        116 -> 116;
+        117 -> 117;
+        118 -> 118;
+        119 -> 119;
+        120 -> 120;
+        121 -> 121;
+        122 -> 122;
+        123 -> 123;
+        124 -> 124;
+        125 -> 125;
+        126 -> 126;
+        127 -> 127;
+        128 -> 128;
+        129 -> 129;
+        130 -> 130;
+        131 -> 131;
+        132 -> 132;
+        133 -> 133;
+        134 -> 134;
+        135 -> 135;
+        136 -> 136;
+        137 -> 137;
+        138 -> 138;
+        139 -> 139;
+        140 -> 140;
+        141 -> 141;
+        142 -> 142;
+        143 -> 143;
+        144 -> 144;
+        145 -> 145;
+        146 -> 146;
+        147 -> 147;
+        148 -> 148;
+        149 -> 149;
+        150 -> 150;
+        151 -> 151;
+        152 -> 152;
+        153 -> 153;
+        154 -> 154;
+        155 -> 155;
+        156 -> 156;
+        157 -> 157;
+        158 -> 158;
+        159 -> 159;
+        160 -> 160;
+        161 -> 161;
+        162 -> 162;
+        163 -> 163;
+        164 -> 164;
+        165 -> 165;
+        166 -> 166;
+        167 -> 167;
+        168 -> 168;
+        169 -> 169;
+        170 -> 170;
+        171 -> 171;
+        172 -> 172;
+        173 -> 173;
+        174 -> 174;
+        175 -> 175;
+        176 -> 176;
+        177 -> 177;
+        178 -> 178;
+        179 -> 179;
+        180 -> 180;
+        181 -> 181;
+        182 -> 182;
+        183 -> 183;
+        184 -> 184;
+        185 -> 185;
+        186 -> 186;
+        187 -> 187;
+        188 -> 188;
+        189 -> 189;
+        190 -> 190;
+        191 -> 191;
+        192 -> 192;
+        193 -> 193;
+        194 -> 194;
+        195 -> 195;
+        196 -> 196;
+        197 -> 197;
+        198 -> 198;
+        199 -> 199;
+        200 -> 200;
+        201 -> 201;
+        202 -> 202;
+        203 -> 203;
+        204 -> 204;
+        205 -> 205;
+        206 -> 206;
+        207 -> 207;
+        208 -> 208;
+        209 -> 209;
+        210 -> 210;
+        211 -> 211;
+        212 -> 212;
+        213 -> 213;
+        214 -> 214;
+        215 -> 215;
+        216 -> 216;
+        217 -> 217;
+        218 -> 218;
+        219 -> 219;
+        220 -> 220;
+        221 -> 221;
+        222 -> 222;
+        223 -> 223;
+        224 -> 224;
+        225 -> 225;
+        226 -> 226;
+        227 -> 227;
+        228 -> 228;
+        229 -> 229;
+        230 -> 230;
+        231 -> 231;
+        232 -> 232;
+        233 -> 233;
+        234 -> 234;
+        235 -> 235;
+        236 -> 236;
+        237 -> 237;
+        238 -> 238;
+        239 -> 239;
+        240 -> 240;
+        241 -> 241;
+        242 -> 242;
+        243 -> 243;
+        244 -> 244;
+        245 -> 245;
+        246 -> 246;
+        247 -> 247;
+        248 -> 248;
+        249 -> 249;
+        250 -> 250;
+        251 -> 251;
+        252 -> 252;
+        253 -> 253;
+        254 -> 254;
+        _: int64 -> 255
+    }
+}
+fn p2s0() -> float64 { 2.0 }
+fn p2s1() -> float64 { 4.0 }
+fn p2s2() -> float64 { 16.0 }
+fn p2s3() -> float64 { 256.0 }
+fn p2s4() -> float64 { 65536.0 }
+fn p2s5() -> float64 { 4294967296.0 }
+fn p2s6() -> float64 { 1.8446744073709552e+19 }
+fn p2s7() -> float64 { 3.402823669209385e+38 }
+fn p2s8() -> float64 { 1.157920892373162e+77 }
+fn p2s9() -> float64 { 1.3407807929942597e+154 }
+
+fn one() -> float64 { 1.0 }
+fn zero() -> float64 { 0.0 }
+fn f256() -> float64 { 256.0 }
+fn pow2_step(i: int64) -> float64 {
+    case i of {
+        0 -> p2s0();
+        1 -> p2s1();
+        2 -> p2s2();
+        3 -> p2s3();
+        4 -> p2s4();
+        5 -> p2s5();
+        6 -> p2s6();
+        7 -> p2s7();
+        8 -> p2s8();
+        9 -> p2s9();
+        _: int64 -> one()
+    }
+}
+
+fn is_zero(k: int64) -> boolean { k == 0 }
+fn is_odd(k: int64) -> boolean { k % 2 == 1 }
+
+// 2^k for 0 <= k < 1024, by binary decomposition of k (exact).
+fn pow2(k: int64, i: int64, acc: float64) -> float64 {
+    case is_zero(k) of {
+        true -> acc;
+        false -> case is_odd(k) of {
+            true -> pow2(k / 2, i + 1, acc * pow2_step(i));
+            false -> pow2(k / 2, i + 1, acc)
+        }
+    }
+}
+
+// v * 2^e for -1074 <= e <= 1023, staying finite at every step.
+fn scale2(v: float64, e: int64) -> float64 {
+    case e >= 0 of {
+        true -> case e > 1000 of {
+            true -> scale2(v * pow2(1000, 0, one()), e - 1000);
+            false -> v * pow2(e, 0, one())
+        };
+        false -> case e < 0 - 1000 of {
+            true -> scale2(v / pow2(1000, 0, one()), e + 1000);
+            false -> v / pow2(0 - e, 0, one())
+        }
+    }
+}
+
+fn byte_f(b: buf(L, normal, uint8, 8), i: int64) -> float64 {
+    sequence proc[mem(normal)]
+        v: uint8 <- read_buf(b, i)
+    produces pure u8_to_f64(v) end
+}
+fn byte_i(b: buf(L, normal, uint8, 8), i: int64) -> int64 {
+    sequence proc[mem(normal)]
+        v: uint8 <- read_buf(b, i)
+    produces pure u8_to_i64(v) end
+}
+
+fn exp_bits(b: buf(L, normal, uint8, 8)) -> int64 { (byte_i(b, 7) % 128) * 16 + byte_i(b, 6) / 16 }
+fn sign_bit(b: buf(L, normal, uint8, 8)) -> boolean { byte_i(b, 7) >= 128 }
+fn nibble_f(b: buf(L, normal, uint8, 8)) -> float64 { u8_to_f64(low_byte(byte_i(b, 6) % 16)) }
+
+// the 52-bit mantissa as an integer-valued float
+fn mant_f(b: buf(L, normal, uint8, 8)) -> float64 {
+    (((((nibble_f(b) * f256() + byte_f(b, 5)) * f256() + byte_f(b, 4)) * f256() + byte_f(b, 3)) * f256() + byte_f(b, 2)) * f256() + byte_f(b, 1)) * f256() + byte_f(b, 0)
+}
+
+fn magnitude(b: buf(L, normal, uint8, 8)) -> float64 {
+    case is_zero(exp_bits(b)) of {
+        true -> scale2(mant_f(b), 0 - 1074);
+        false -> scale2(pow2(52, 0, one()) + mant_f(b), exp_bits(b) - 1023 - 52)
+    }
+}
+
+fn negate_if(neg: boolean, m: float64) -> float64 {
+    case neg of { true -> zero() - m; false -> m }
+}
+
+fn decode_f64(b: buf(L, normal, uint8, 8)) -> float64 { negate_if(sign_bit(b), magnitude(b)) }
+
+// ---- encoding ----
+fn is_neg(v: float64) -> boolean { v < zero() }
+fn is_zero_f(v: float64) -> boolean { v == zero() }
+fn abs_f(v: float64) -> float64 { case is_neg(v) of { true -> zero() - v; false -> v } }
+
+// Largest e with 2^e <= v, for finite v > 0, by descending search from 1023.
+fn exponent_of(v: float64, e: int64) -> int64 {
+    case e <= 0 - 1074 of {
+        true -> 0 - 1074;
+        false -> case scale2(one(), e) <= v of {
+            true -> e;
+            false -> exponent_of(v, e - 1)
+        }
+    }
+}
+
+// Peel bits `bit`..0 off an integer-valued float f < 2^(bit+1) into an int64.
+fn peel(f: float64, bit: int64, acc: int64) -> int64 {
+    case bit < 0 of {
+        true -> acc;
+        false -> case f >= pow2(bit, 0, one()) of {
+            true -> peel(f - pow2(bit, 0, one()), bit - 1, acc * 2 + 1);
+            false -> peel(f, bit - 1, acc * 2)
+        }
+    }
+}
+
+fn exp_of_abs(v: float64) -> int64 {
+    case is_zero_f(v) of { true -> 0 - 1075; false -> exponent_of(abs_f(v), 1023) }
+}
+fn biased_exp(e: int64) -> int64 { case e < 0 - 1022 of { true -> 0; false -> e + 1023 } }
+fn mantissa_float(a: float64, e: int64) -> float64 {
+    case e < 0 - 1022 of {
+        true -> scale2(a, 1074);
+        false -> scale2(a, 52 - e) - pow2(52, 0, one())
+    }
+}
+fn mantissa_int(v: float64) -> int64 { peel(mantissa_float(abs_f(v), exp_of_abs(v)), 51, 0) }
+
+fn put_bytes(b: buf(L, normal, uint8, 8), n: int64, i: int64, last: int64) -> atom {
+    sequence proc[mem(normal)]
+        v: uint8 <- low_byte(n);
+        _: atom <- write_buf(b, i, v);
+        rest: atom <- case i == last of { true -> :ok; false -> put_bytes(b, n / 256, i + 1, last) }
+    produces pure rest end
+}
+
+fn write_parts(b: buf(L, normal, uint8, 8), neg: boolean, biased: int64, mant: int64) -> atom {
+    sequence
+        _: atom <- put_bytes(b, mant, 0, 5);
+        b6: int64 <- mant / 281474976710656 + (biased % 16) * 16;
+        b7: int64 <- biased / 16 + (case neg of { true -> 128; false -> 0 });
+        _: atom <- put_bytes(b, b6, 6, 6);
+        _: atom <- put_bytes(b, b7, 7, 7)
+    produces pure :ok end
+}
+
+// The value is fetched afresh for each use (SD-14: a float parameter does not survive a call).
+fn encode_f64(b: buf(L, normal, uint8, 8), i: int64) -> atom {
+    write_parts(b, is_neg(value(i)), biased_exp(exp_of_abs(value(i))), mantissa_int(value(i)))
+}
+
+fn show(b: buf(L, normal, uint8, 8), i: int64) -> atom {
+    sequence proc[device_io]
+        v: int64 <- byte_i(b, i);
+        _: atom <- print_int64(v);
+        print_string(" ");
+        r: atom <- case i == 0 of { true -> :ok; false -> show(b, i - 1) }
+    produces pure r end
+}
+
+fn same(a: float64, b: float64) -> boolean { a == b }
+
+fn v0() -> float64 { 1.0 }
+fn v1() -> float64 { 0.0 - 2.5 }
+fn v2() -> float64 { 0.1 }
+fn v3() -> float64 { 3.14159 }
+fn v4() -> float64 { 1.0e300 }
+fn v5() -> float64 { 0.0 }
+fn v6() -> float64 { 4.9e-324 }
+fn value(i: int64) -> float64 {
+    case i of { 0 -> v0(); 1 -> v1(); 2 -> v2(); 3 -> v3(); 4 -> v4(); 5 -> v5(); _: int64 -> v6() }
+}
+
+fn round_trip(b: buf(L, normal, uint8, 8), i: int64) -> atom {
+    sequence proc[device_io]
+        _: atom <- encode_f64(b, i);
+        _: atom <- show(b, 7);
+        ok: boolean <- same(decode_f64(b), value(i));
+        _: atom <- print_bool(ok);
+        println("");
+        rest: atom <- case i == 6 of { true -> :ok; false -> round_trip(b, i + 1) }
+    produces pure rest end
+}
+
+fn main() -> int64 {
+    sequence proc[mem(normal)]
+        L: lifetime <- fresh_lifetime();
+        r: region(L, normal) <- alloc_region(normal);
+        b: buf(L, normal, uint8, 8) <- alloc_buf(r, 8);
+        _: atom <- round_trip(b, 0)
+    produces pure 0 end
+}
