@@ -1,0 +1,28 @@
+// S9 reference lowering 2: try/catch under D2. Nothing is caught inside an actor, so
+//
+//   to_atom(S) -> try list_to_existing_atom(S) catch error:badarg -> undefined end.
+//
+// is rewritten by the compiler into the result-returning variant, here bees_atoms@from_spelling:
+// a spelling the program holds gives {found: true, value}, any other gives found: false.
+// Expected: hello true / undefined
+use bees_atoms;
+
+fn to_atom(s: string) -> atom {
+    f: { found: boolean, value: atom } <- bees_atoms@from_spelling(s);
+    case f.found of {
+        true -> f.value;
+        false -> bees_atoms@a_undefined()
+    }
+}
+
+fn main() -> int64 {
+    sequence proc[device_io]
+        a: atom <- to_atom("hello");
+        print_string(bees_atoms@spelling(a));
+        print_string(" ");
+        _: atom <- print_bool(a == bees_atoms@a_hello());
+        println("");
+        b: atom <- to_atom("no_such_atom");
+        println(bees_atoms@spelling(b))
+    produces pure 0 end
+}

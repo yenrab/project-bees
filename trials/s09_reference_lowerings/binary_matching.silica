@@ -1,0 +1,56 @@
+// S9 reference lowering 4: bit-syntax matching without type conversion (roadmap §4.5).
+//
+//   parse(<<Len:8, Tag:16/big, Rest/binary>>) -> {Len, Tag, byte_size(Rest)}.
+//   parse(<<3, 1, 2, 9, 9, 9>>) -> {3, 258, 3}.
+//
+// bees_term v0 holds a binary as tag 7 with n = byte count and h = a list of int cells 0..255
+// (a buf(uint8) slot in the cell waits on a fixed-size type; A1). The compiler lowers each
+// segment to reads of consecutive bytes and same-type int64 arithmetic: Tag = b1 * 256 + b2.
+// Expected: 3 258 3
+use bees_term;
+
+// <<3, 1, 2, 9, 9, 9>> as a term: the byte list, then the binary cell
+fn byte_list(h: { r: region(L, normal), c: ref?(L, normal, rec) }, i: int64) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    sequence
+        b: int64 <- case i of { 0 -> 3; 1 -> 1; 2 -> 2; _: int64 -> 9 };
+        rest: { r: region(L, normal), c: ref?(L, normal, rec) } <- case i == 6 of {
+            true -> bees_term@mk_nil(h);
+            false -> byte_list(h, i + 1)
+        };
+        cell: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_int(rest, b);
+        out: { r: region(L, normal), c: ref?(L, normal, rec) } <- case i == 6 of { true -> rest; false -> bees_term@mk_cons(cell, cell.c, rest.c) }
+    produces pure out end
+}
+fn mk_binary(h: { r: region(L, normal), c: ref?(L, normal, rec) }, n: int64, bs: ref?(L, normal, rec)) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    sequence proc[mem(normal), concurrency]
+        me: actor_ref <- self();
+        c: ref(L, normal, (int64, int64, float64, atom, actor_ref, ref?(L, normal, rec), ref?(L, normal, rec))) <- alloc_rec(h.r, (7, n, 0.0, :ok, me, bs, :none))
+    produces pure { r: h.r, c: bees_term@wrap_ref(c) } end
+}
+
+// byte i of a binary
+fn byte_at(bin: ref?(L, normal, rec), i: int64) -> int64 {
+    bl: { c: ref?(L, normal, rec) } <- bees_term@hd_of(bin);
+    b: { c: ref?(L, normal, rec) } <- bees_term@nth(bl.c, i);
+    bees_term@int_of(b.c)
+}
+
+fn main() -> int64 {
+    sequence proc[mem(normal), device_io]
+        L: lifetime <- fresh_lifetime();
+        r: region(L, normal) <- alloc_region(normal);
+        bl: { r: region(L, normal), c: ref?(L, normal, rec) } <- byte_list(bees_term@heap_of(r), 0);
+        bin: { r: region(L, normal), c: ref?(L, normal, rec) } <- mk_binary(bl, 6, bl.c);
+        size: int64 <- bees_term@int_of(bin.c);
+        // the match: Len:8 at byte 0, Tag:16/big at bytes 1-2, Rest/binary from byte 3
+        ok: boolean <- bees_term@tag(bin.c) == 7 and size >= 3;
+        len: int64 <- byte_at(bin.c, 0);
+        tg: int64 <- byte_at(bin.c, 1) * 256 + byte_at(bin.c, 2);
+        rest_size: int64 <- size - 3;
+        _: atom <- case ok of {
+            true -> { _: atom <- print_int64(len); print_string(" "); _: atom <- print_int64(tg); print_string(" "); _: atom <- print_int64(rest_size); :ok };
+            false -> { println("badmatch"); :ok }
+        };
+        println("")
+    produces pure 0 end
+}

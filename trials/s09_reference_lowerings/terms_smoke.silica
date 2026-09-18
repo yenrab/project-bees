@@ -1,0 +1,39 @@
+// S9 warm-up: build [1, 2] and {ping, Pid, 3} in a heap, copy the tuple into a second heap and
+// compare structurally (pids compare unequal until S-26, so the tuple here holds no pid).
+// Expected: 2 true 3 true
+use bees_atoms;
+use bees_term;
+
+fn main() -> int64 {
+    sequence proc[mem(normal), device_io]
+        L: lifetime <- fresh_lifetime();
+        r: region(L, normal) <- alloc_region(normal);
+        h0: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_nil(bees_term@heap_of(r));
+        h1: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_int(h0, 2);
+        h2: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_cons(h1, h1.c, h0.c);
+        h3: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_int(h2, 1);
+        h4: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_cons(h3, h3.c, h2.c);
+        _: atom <- print_int64(bees_term@list_len(h4.c));
+        print_string(" ");
+        // {ping, ok, 3} as a tuple over the element list [ping, ok, 3]
+        h5: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_int(h4, 3);
+        h6: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_cons(h5, h5.c, h0.c);
+        h7: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_atom(h6, bees_atoms@a_ok());
+        h8: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_cons(h7, h7.c, h6.c);
+        h9: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_atom(h8, bees_atoms@a_ping());
+        h10: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_cons(h9, h9.c, h8.c);
+        h11: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_tuple(h10, 3, h10.c);
+        first: { c: ref?(L, normal, rec) } <- bees_term@nth(h10.c, 0);
+        _: atom <- print_bool(bees_term@atom_of(first.c) == bees_atoms@a_ping());
+        print_string(" ");
+        third: { c: ref?(L, normal, rec) } <- bees_term@nth(h10.c, 2);
+        _: atom <- print_int64(bees_term@int_of(third.c));
+        print_string(" ");
+        // a second heap: the lifetime name is L again (SD-6: names are nominal), rebinding L
+        L: lifetime <- fresh_lifetime();
+        r2: region(L, normal) <- alloc_region(normal);
+        g: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@copy(bees_term@heap_of(r2), h11.c);
+        _: atom <- print_bool(bees_term@eq(g.c, h11.c));
+        println("")
+    produces pure 0 end
+}

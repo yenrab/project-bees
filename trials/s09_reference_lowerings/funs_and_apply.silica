@@ -1,0 +1,94 @@
+// S9 reference lowering 3: funs and apply/3.
+//
+//   -module(m).
+//   twice(F, X) -> F(F(X)).
+//   run() -> Add = fun(N) -> N + 3 end, twice(Add, 10).           % 16
+//   dyn() -> apply(m, twice, [fun(N) -> N * 2 end, 5]).           % 20
+//
+// A fun is a term (tag 8): n = module index, h = cons(fn index, env list). Each module emits
+// apply_fun(fun, args): a case over its fn indices calling the lifted closure bodies, and an
+// apply entry: a case over its exported (name, arity) pairs. bees_config combines the modules'
+// entries into the program-wide module table (here: one module, index 0).
+// Expected: 16 20
+use bees_atoms;
+use bees_term;
+
+// lifted closure bodies: (env, args) -> result, all over terms in the heap h
+fn closure_0(h: { r: region(L, normal), c: ref?(L, normal, rec) }, env: ref?(L, normal, rec), args: ref?(L, normal, rec)) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    a0: { c: ref?(L, normal, rec) } <- bees_term@nth(args, 0);
+    bees_term@mk_int(h, bees_term@int_of(a0.c) + 3)
+}
+fn closure_1(h: { r: region(L, normal), c: ref?(L, normal, rec) }, env: ref?(L, normal, rec), args: ref?(L, normal, rec)) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    a0: { c: ref?(L, normal, rec) } <- bees_term@nth(args, 0);
+    bees_term@mk_int(h, bees_term@int_of(a0.c) * 2)
+}
+
+// the module's fun dispatch entry
+fn apply_fun(h: { r: region(L, normal), c: ref?(L, normal, rec) }, f: ref?(L, normal, rec), args: ref?(L, normal, rec)) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    body: { c: ref?(L, normal, rec) } <- bees_term@hd_of(f);
+    idx: { c: ref?(L, normal, rec) } <- bees_term@hd_of(body.c);
+    env: { c: ref?(L, normal, rec) } <- bees_term@tl_of(body.c);
+    case bees_term@int_of(idx.c) of {
+        0 -> closure_0(h, env.c, args);
+        1 -> closure_1(h, env.c, args);
+        _: int64 -> bees_term@mk_nil(h)
+    }
+}
+
+// a fun literal: fun cell over cons(index, env)
+fn mk_fun(h: { r: region(L, normal), c: ref?(L, normal, rec) }, idx: int64) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    sequence proc[mem(normal), concurrency]
+        h0: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_nil(h);
+        h1: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_int(h0, idx);
+        h2: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_cons(h1, h1.c, h0.c);
+        me: actor_ref <- self();
+        c: ref(L, normal, (int64, int64, float64, atom, actor_ref, ref?(L, normal, rec), ref?(L, normal, rec))) <- alloc_rec(h2.r, (8, 0, 0.0, :ok, me, h2.c, :none))
+    produces pure { r: h2.r, c: bees_term@wrap_ref(c) } end
+}
+
+// [X] as an argument list
+fn args1(h: { r: region(L, normal), c: ref?(L, normal, rec) }, x: ref?(L, normal, rec)) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    sequence
+        h0: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_nil(h)
+    produces pure bees_term@mk_cons(h0, x, h0.c) end
+}
+
+// twice(F, X) -> F(F(X)).
+fn twice(h: { r: region(L, normal), c: ref?(L, normal, rec) }, f: ref?(L, normal, rec), x: ref?(L, normal, rec)) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    sequence
+        a1: { r: region(L, normal), c: ref?(L, normal, rec) } <- args1(h, x);
+        y: { r: region(L, normal), c: ref?(L, normal, rec) } <- apply_fun(a1, f, a1.c);
+        a2: { r: region(L, normal), c: ref?(L, normal, rec) } <- args1(y, y.c)
+    produces pure apply_fun(a2, f, a2.c) end
+}
+
+// apply(m, twice, [F, X]) through the module's apply entry: (function index, args)
+fn apply_entry(h: { r: region(L, normal), c: ref?(L, normal, rec) }, fn_index: int64, args: ref?(L, normal, rec)) -> { r: region(L, normal), c: ref?(L, normal, rec) } {
+    a0: { c: ref?(L, normal, rec) } <- bees_term@nth(args, 0);
+    a1: { c: ref?(L, normal, rec) } <- bees_term@nth(args, 1);
+    case fn_index of {
+        0 -> twice(h, a0.c, a1.c);
+        _: int64 -> bees_term@mk_nil(h)
+    }
+}
+
+fn main() -> int64 {
+    sequence proc[mem(normal), device_io]
+        L: lifetime <- fresh_lifetime();
+        r: region(L, normal) <- alloc_region(normal);
+        h0: { r: region(L, normal), c: ref?(L, normal, rec) } <- mk_fun(bees_term@heap_of(r), 0);
+        h1: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_int(h0, 10);
+        v: { r: region(L, normal), c: ref?(L, normal, rec) } <- twice(h1, h0.c, h1.c);
+        _: atom <- print_int64(bees_term@int_of(v.c));
+        print_string(" ");
+        // dyn(): apply(m, twice, [fun(N) -> N * 2 end, 5]) through the apply entry
+        g0: { r: region(L, normal), c: ref?(L, normal, rec) } <- mk_fun(v, 1);
+        g1: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_int(g0, 5);
+        g2: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_nil(g1);
+        g3: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_cons(g2, g1.c, g2.c);
+        g4: { r: region(L, normal), c: ref?(L, normal, rec) } <- bees_term@mk_cons(g3, g0.c, g3.c);
+        w: { r: region(L, normal), c: ref?(L, normal, rec) } <- apply_entry(g4, 0, g4.c);
+        _: atom <- print_int64(bees_term@int_of(w.c));
+        println("")
+    produces pure 0 end
+}
