@@ -1,0 +1,27 @@
+// S11: the cost of migrate_actor() itself: 20,000 migrations of one idle actor between two
+// cores. Prints the count and "done"; the harness's wall time is the measurement (see the note).
+// The core is bound first: an expression in that position faults (SD-19).
+fn idle(msg: int64, state: int64) -> (:no_reply, int64) {
+    sequence proc[device_io]
+        _: atom <- case msg == 0 - 1 of { true -> { println("done"); :ok }; false -> :ok }
+    produces pure (:no_reply, state) end
+}
+
+fn migrate_n(a: actor_ref, i: int64, n: int64) -> atom {
+    sequence
+        core: int64 <- 1 + i % 2;
+        _: atom <- migrate_actor(a, core);
+        r: atom <- case i + 1 == n of { true -> :ok; false -> migrate_n(a, i + 1, n) }
+    produces pure r end
+}
+
+fn main() -> int64 {
+    sequence proc[concurrency, device_io]
+        a: actor_ref <- spawn(0, idle, 1);
+        _: atom <- migrate_n(a, 0, 20000);
+        _: atom <- print_int64(20000);
+        println("");
+        _: boolean <- cast(a, 0 - 1 impl ActorMessage {});
+        _: int64 <- wait_for_exit()
+    produces pure 0 end
+}

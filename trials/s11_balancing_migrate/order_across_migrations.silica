@@ -1,0 +1,48 @@
+// S11: message order across migrate_actor(). An actor spawned on core 1 receives numbered
+// messages while main migrates it to a different core every 100 messages (10 cores round
+// robin) and finally sends -1. The actor checks that every sequence number is the previous
+// plus one and, on -1, prints the count received, whether the order ever broke, and "done".
+// Expected: 100000 false / done
+fn checker(msg: int64, state: { expect: int64, broken: boolean }) -> (:no_reply, { expect: int64, broken: boolean }) {
+    sequence
+        next: { expect: int64, broken: boolean } <- case msg == 0 - 1 of {
+            true -> state;
+            false -> { expect: state.expect + 1, broken: state.broken or msg != state.expect }
+        };
+        _: atom <- case msg == 0 - 1 of {
+            true -> report(state.expect, state.broken);
+            false -> :ok
+        }
+    produces pure (:no_reply, next) end
+}
+
+fn report(count: int64, broken: boolean) -> atom {
+    sequence proc[device_io]
+        _: atom <- print_int64(count);
+        print_string(" ");
+        _: atom <- print_bool(broken);
+        println("");
+        println("done")
+    produces pure :ok end
+}
+
+fn send_n(a: actor_ref, i: int64, n: int64) -> atom {
+    sequence proc[concurrency]
+        core: int64 <- (i / 100) % 10;
+        _: atom <- case i % 100 == 0 of {
+            true -> migrate_actor(a, core);
+            false -> :ok
+        };
+        _: boolean <- cast(a, i impl ActorMessage {});
+        r: atom <- case i + 1 == n of { true -> :ok; false -> send_n(a, i + 1, n) }
+    produces pure r end
+}
+
+fn main() -> int64 {
+    sequence proc[concurrency, device_io]
+        a: actor_ref <- spawn({ expect: 0, broken: false }, checker, 1);
+        _: atom <- send_n(a, 0, 100000);
+        _: boolean <- cast(a, 0 - 1 impl ActorMessage {});
+        _: int64 <- wait_for_exit()
+    produces pure 0 end
+}
