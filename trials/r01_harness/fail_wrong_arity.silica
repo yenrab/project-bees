@@ -1,0 +1,8 @@
+// R0.1: a compile-fail trial; answer/1 called with no arguments (E2005).
+// Note: calling it with TWO arguments compiles today (Silica defect, see
+// development-plan/silica-defects.md), so this trial uses too few.
+use bees_hello;
+
+fn main() -> int64 {
+    bees_hello@answer()
+}

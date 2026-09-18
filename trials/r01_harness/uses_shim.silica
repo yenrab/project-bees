@@ -1,0 +1,9 @@
+// R0.1: an entry program that uses a shim unit through lib/.
+use bees_hello;
+
+fn main() -> int64 {
+    sequence proc[device_io]
+        _: atom <- print_int64(bees_hello@answer(2));
+        println("")
+    produces pure 0 end
+}
