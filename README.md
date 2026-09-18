@@ -12,7 +12,7 @@ The name nods to **Bogdan and Björn’s Erlang Abstract Machine (BEAM)**. BEES 
 
 - **Target contract** — the language-neutral specification that language-to-Silica compilers target. For each BEAM construct it says which Silica construct or BEES component it becomes. It comes with a conformance kit that compilers can check themselves against.
 - **Execution surface** — the boundary at which “BEAM-like” code meets the host: schedulers, actor lifecycle hooks, links, and networking-aware execution (as the project defines them over time).
-- **Multi-core** — **balancing and affinitizing actors** to cores, and policies for fairness, preemption, and locality, appropriate to a Silica-backed runtime. Silica schedules each core; BEES balances and places across cores through Silica's `migrate_actor()`. On OS-hosted apps it balances BEAM-style between the Silica runtime's carrier threads, and exclusive placement is never guaranteed, because the OS owns the cores. Running raw on a chip, it balances BEAM-style-ish directly onto the cores, and a pin is exclusive.
+- **Multi-core** — **balancing and affinitizing actors** to cores, and policies for fairness, yielding, and locality, appropriate to a Silica-backed runtime. Silica schedules each core; BEES balances and places across cores through Silica's `migrate_actor()`. On OS-hosted apps it balances BEAM-style between the Silica runtime's carrier threads, and exclusive placement is never guaranteed, because the OS owns the cores. Running raw on a chip, it balances BEAM-style-ish directly onto the cores, and a pin is exclusive.
 - **Networking** — **distribution-oriented paths**: naming or addressing actors across nodes, and protocols or adapters for sending messages and coordinating placement. There are two modes: **SEMP/TRUST**, secure by default, of which BEES is the first implementation, and **standard BEAM distribution**, an explicit downgrade for interoperating with Erlang/OTP clusters.
 - **Clear dependency on Silica** — BEES is expected to use Silica for compilation and any runtime pieces that are already in Silica; **its repository** is meant to track the **orchestration layer, APIs, and integration** that are specific to a BEAM-style surface rather than the whole compiler.
 - **Documentation of intent** — what is guaranteed, what is compatible with Erlang/OTP concepts, and what is **Silica-specific** behavior.
@@ -23,6 +23,7 @@ The name nods to **Bogdan and Björn’s Erlang Abstract Machine (BEAM)**. BEES 
 - Loading or interpreting `.beam` bytecode at run time. BEAM-language code is compiled ahead of time.
 - Duplicating every BEAM type and behaviour. Where Silica differs (for example, supervisor-only exit trapping, or Silica-shaped failure messages), the language compiler adapts.
 - The language-to-Silica compilers themselves. Each one is its own project.
+- Holding or depending on OTP source code. Each compiler converts the OTP behaviours and libraries its language uses. Where BEES itself needs such a facility (`gen_tcp`, `file`, `erpc`, `global`, and so on), it implements it in Silica.
 - Replacing the **entire** Silica project; BEES is a **sibling** product and repository whose role is the **actor execution and distribution** story on top of Silica.
 - **Vendor-specific** deployment recipes unless they are clearly optional and documented as such.
 

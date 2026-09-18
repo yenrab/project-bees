@@ -19,11 +19,13 @@ B3 and B4 (BEAM mode) in the [roadmap](roadmap.md). SEMP/TRUST has no implementa
 `BEAM_SEMP` is the **design starting point**, and BEES is the implementation. Where that code disagrees with its own
 documentation, this document follows the documentation. §3.12 lists every such discrepancy.
 
-> **Decisions.** Every decision this document cites has been made ([roadmap §6](roadmap.md#6-decisions)).
+> **Decisions.** Every decision this document cites has been made ([roadmap §6](roadmap.md#6-decisions)), except
+> D27, TLS session resumption in TRUST (§3.5), which waits on B1's latency numbers.
 
-Both modes are implemented in Silica as parts of the BEES shim. Compiled BEAM code reaches them through the usual
-module names (`trpc`, and `erlang`'s distribution BIFs underneath OTP's compiled `net_kernel`, `erpc`, `global` and
-`pg`), so an application written for BEAM_SEMP or for distributed Erlang keeps its source code.
+Both modes are implemented in Silica as parts of the BEES shim, and so is everything above them that OTP supplies as
+Erlang libraries: `net_kernel`, `erpc`, `rpc`, `global` and `pg` are BEES's own (roadmap D24). Compiled BEAM code
+reaches them through the usual module names (`trpc`, `erlang`'s distribution BIFs, and those modules), so an
+application written for BEAM_SEMP or for distributed Erlang keeps its source code.
 
 ---
 
@@ -69,7 +71,7 @@ therefore depends on the mode:
   known when the application is built.
 - **BEAM mode** follows OTP. Messages are delivered to any pid or registered name, as they are between Erlang nodes.
   Remote spawn (SPAWN_REQUEST, which is what `erpc` and `rpc` use) is governed by the scoped `spawn` option in §4.5,
-  and is off by default.
+  and is off by default. Calls and casts to `gen_server`s and `gen_statem`s use OTP's `gen` protocol (§4.7).
 
 ### 1.2 Re-creation and the ingress gate
 
@@ -119,8 +121,11 @@ reads with `application:get_env`, so the BEAM_SEMP README's configuration exampl
 fail-fast: an invalid value aborts boot with a clear error, and values are never clamped, as the multiplexing design
 requires.
 
-BEES reads `sys.config` at boot with its own small reader for Erlang term text, because configuration must be
-available before any compiled OTP code (such as `erl_parse`) is running.
+BEES reads `sys.config` at boot with its own small reader for Erlang term text (roadmap D26), whatever language the
+program is written in. The reader is BEES's own, so configuration is available before any compiled code runs, and
+BEES depends on no converted OTP code to read it. On the ESP32-S3, which has no filesystem, the language compiler
+compiles the configuration and every file it names (certificates, keys, whitelist, server pins, cookie) into the
+application as a generated Silica module, and BEES reads that module instead (D26).
 
 ```erlang
 [
@@ -234,7 +239,7 @@ replaced by Silica TLS intrinsics (S-13) without a wire change.
 **What a token buys.** In the reference implementation, the whitelist and suspicion checks run on every connection
 whether or not a token is presented. The token saves only the `token_issue` frame. For B1, BEES keeps that meaning: a
 token proves a recent full-path admission, and both checks run every time because they are cheap lookups. B2
-multiplexing is the real answer to handshake cost. TLS 1.3 session resumption is still an open question, to be
+multiplexing is the real answer to handshake cost. TLS 1.3 session resumption is open (roadmap D27), to be
 decided on B1's latency numbers. If allowed, it would use single-use, short-lived tickets bound to the peer
 fingerprint, and still no 0-RTT.
 
@@ -343,7 +348,7 @@ The multiplexing design document maps onto BEES components as follows:
 | Pause reads when `inflight == max_inflight` | Leave the `bees_io` port un-armed (`{active, once}` not re-armed): Option A, no user-space queue |
 | `state_timeout` for idle; `send_after` for maximum age | State-machine timeouts; `bees_timer` |
 | Cancel by close (`kill_workers`) | Client close → terminate the per-connection supervisor with reason `client_cancel`; no suspicion increment |
-| `logger` and `telemetry` events | Compiled OTP `logger` with BEES back ends, and `bees_telemetry`; event names unchanged |
+| `logger` and `telemetry` events | `bees_log` and `bees_telemetry`, BEES's own (D24); event names unchanged |
 
 The design doc's acceptance criteria 1–10 become the B2 trial suite.
 
@@ -404,10 +409,10 @@ posture when an operator deliberately wants it. It is a **downgrade**, as parall
 
 | Level | Capability | Milestone |
 | --- | --- | --- |
-| **L1 Messaging** | EPMD registration and lookup; the handshake; ticks; sending to remote pids and to `{Name, Node}`, in both directions | Stage 1 (partial), B3 |
-| **L2 Lifecycle** | LINK, UNLINK_ID and its acknowledgement, EXIT and EXIT2. `noconnection` is delivered to every link that crosses a lost connection. Monitor requests from OTP peers (`MONITOR_P`, `DEMONITOR_P`) are dropped silently, and `MONITOR_P_EXIT` is never sent (D21). A `gen_server:call` from an Erlang node still gets its reply, but if the BEES process dies mid-call, the caller waits for its timeout. Compiled code has no monitors (D20). | B3, I1 |
-| **L3 Remote execution** | SPAWN_REQUEST and SPAWN_REPLY, so compiled `erpc` and `rpc` work in both directions, subject to the `spawn` option | B4 (after 1.0) |
-| **L4 Cluster services** | TLS distribution compatible with `inet_tls_dist`; `global` and `pg`, compiled from OTP | B4 (after 1.0) |
+| **L1 Messaging** | EPMD registration and lookup; the handshake; ticks; sending to remote pids and to `{Name, Node}`, in both directions; `gen_server` and `gen_statem` calls and casts in both directions over the OTP `gen` protocol (§4.7); both transports, `tcp` and `tls` (§4.5, D25) | Stage 1 (partial), B3 |
+| **L2 Lifecycle** | LINK, UNLINK_ID and its acknowledgement, EXIT and EXIT2. `noconnection` is delivered to every link that crosses a lost connection. **A lost node is discovered by sending to it** (D28): there is no `nodedown` notification and no `monitor_node`; a send to a pid or name on a node that cannot be reached, after the reconnection attempt OTP would also make, fails the sender with `noconnection`, or returns it from the result-returning variant (D2). Monitor requests from OTP peers (`MONITOR_P`, `DEMONITOR_P`) are dropped silently, and `MONITOR_P_EXIT` is never sent (D21). A `gen_server:call` from an Erlang node still gets its reply, but if the BEES process dies mid-call, the caller waits for its timeout. Compiled code has no monitors (D20). | B3, I1 |
+| **L3 Remote execution** | SPAWN_REQUEST and SPAWN_REPLY, so BEES's own `erpc` and `rpc` work in both directions, subject to the `spawn` option | B4 (after 1.0) |
+| **L4 Cluster services** | BEES's own `net_kernel`, `global` and `pg`, in Silica (D24), interoperating with their OTP counterparts | B4 (after 1.0) |
 
 Exit signals crossing a node boundary follow D18.
 - An `EXIT2` arriving from an Erlang node becomes an exit request to the target's supervisor, exactly as a local
@@ -467,6 +472,8 @@ so they cannot be reached from BEAM mode unless an application wraps them in a c
 
 BEAM-mode TLS uses a **compatibility profile** (TLS 1.3, X25519, ECDSA or RSA certificates) so that stock OTP
 `inet_tls_dist` can connect. It is weaker than the TRUST profile in §3.2, and is documented as part of the downgrade.
+Because it is the default transport, it ships in 1.0 with B3 (D25); the native edge's TLS interface offers both
+profiles, and spike S12 checks this one against stock `inet_tls_dist`.
 
 ### 4.6 Interoperability test matrix
 
@@ -477,9 +484,57 @@ The BEES trial tree covers every combination of:
 - `tcp` and `tls`;
 - both connection directions: BEES dials Erlang, and Erlang dials BEES.
 
-It also includes partition trials: kill the peer node, then check `nodedown` and `noconnection` delivery on each side.
+It also includes partition trials: kill the peer node, then check that every link crossing the lost connection gets
+`noconnection` on each side, that the OTP side sees `nodedown`, and that the next send from BEES to the lost node
+reports `noconnection` (D28).
 The README's compatibility statement is generated from this matrix, which gives the README the tested guarantee it
 requires.
+
+### 4.7 Calls and casts to and from OTP behaviours
+
+BEES speaks OTP's `gen` protocol on the wire, so a `gen_server` or `gen_statem` on either side is called the
+standard way. This is **`bees_gen`**, part of `bees_dist`, and it is BEES's own Silica (roadmap D24): no compiler
+and no converted OTP code takes part. Which of a language's constructs use it is each compiler's choice; the
+protocol itself is BEES's.
+
+The protocol, as the OTP release in D14 defines it:
+
+- a call is the message `{'$gen_call', {From, Tag}, Request}`, answered by the message `{Tag, Reply}` to `From`,
+  where `Tag` is a reference or, from OTP 24, `[alias | Ref]`;
+- a cast is the message `{'$gen_cast', Msg}`;
+- `gen_statem` uses the same two shapes.
+
+**Outbound: compiled code calls a behaviour on an OTP node.**
+
+- `bees_gen:call/3` and `bees_gen:cast/2` accept any pid or `{Name, Node}`. For a local target they follow contract
+  item 5; for a remote target they use the wire. A compiler therefore need not branch on where the target lives.
+- For a remote call, BEES starts a **per-call worker** under the node connection's supervisor. The worker is `From`:
+  it sends the `$gen_call` through the connection and waits for `{Tag, Reply}`. The calling process makes a Silica
+  `call` to the worker, so the reply comes back to it as a value.
+- Per D2, `bees_gen:call/3` fails the caller on timeout, as `gen_server:call` would exit, and a variant returns
+  `timeout` as a value. If the connection is lost while the call is pending, the caller fails with `noconnection`,
+  or the variant returns it.
+- No monitor is needed (D20): the worker lives only for the call, the connection's death ends it, and the caller's
+  Silica `call` wakes with the result either way.
+- A reply that arrives after the worker has ended is addressed to a dead pid and is dropped at delivery (§4.4), so
+  no late reply reaches the caller's mailbox.
+
+**Inbound: an OTP node calls a behaviour on BEES.**
+
+- The message arrives for a pid or a registered name like any other (§4.4). Delivery recognises the two shapes
+  above before handing the term on.
+- A `$gen_cast` becomes a Silica `cast` of `Msg` to the actor the pid denotes, which accepts casts (contract item 5,
+  S-31).
+- A `$gen_call` is performed by a **per-request worker** under the node connection: it makes a Silica `call` of
+  `Request` to the target's call half, reached from the exposed pid as contract item 5 specifies, and sends
+  `{Tag, Reply}` back to `From` through the connection. If the target dies during the call, the worker's `call`
+  wakes with the death result and the worker ends without replying; the OTP caller then waits out its own timeout,
+  because monitor requests are dropped (D21).
+- A pid with no call half is a plain process, and the `$gen_call` term is delivered to it unchanged, which is what
+  OTP does. Whether a pid has a call half, and how it is reached, is what contract item 5 fixes.
+
+`sys` system messages and `gen_event` notifications are not part of this layer; they are delivered as ordinary
+messages.
 
 ---
 
